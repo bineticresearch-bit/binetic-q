@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/binetic-q"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/bineticresearch-bit/binetic-q"
+
+[workspace.dependencies]
+# Development wiring: path deps to the local substrate so Q0 builds against
+# the L2/L3 + chain-linking fixes. On release these switch to git deps pinned
+# to binetic-engine (see README "Dependency wiring").
+binetic-core = { path = "../binetic-core/binetic/rust/crates/binetic-core" }
+binetic-fabric = { path = "../binetic-core/binetic/rust/crates/binetic-fabric" }
+binetic-verify = { path = "../binetic-core/binetic/rust/crates/binetic-verify" }
+binetic-evolver = { path = "../binetic-core/binetic/rust/crates/binetic-evolver" }
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

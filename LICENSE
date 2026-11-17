@@ -1,0 +1,10 @@
+Copyright (c) 2026 binetic.ai
+All rights reserved.
+
+Proprietary. Binetic Q and the accompanying compiler sources are proprietary
+to binetic.ai and may not be copied, modified, or distributed without prior
+written consent.
+
+The underlying fabric crates (binetic-core, binetic-fabric, binetic-verify)
+are separately licensed in their home repository. No third-party code is
+vendored here.

@@ -1,0 +1,19 @@
+[package]
+name = "binetic-q"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Binetic Q — a C-like verified block language over the Binetic compute fabric"
+
+[[bin]]
+name = "binetic-q"
+path = "src/main.rs"
+
+[dependencies]
+binetic-core = { workspace = true }
+binetic-fabric = { workspace = true }
+binetic-verify = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
