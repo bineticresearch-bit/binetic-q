@@ -1,0 +1,8 @@
+intent pipeline {
+  input i64[8];
+  output i64[8];
+  demand L3;
+  pipeline [dot, dot, gate];
+  weights [3, 5, 9];
+  geometry fixed;
+}

@@ -20,12 +20,16 @@ pub mod ir;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
+pub mod synth;
 
 pub use binetic_evolver::Fitness;
 pub use check::{check, CheckError};
 pub use fitness::{optimize, OptimizeConfig, OptimizeResult, QFitnessFn};
 pub use ir::{receipt_effect, DType, Kernel, Level, QGraph, QProgram, Qblock, Stage, TensorType};
 pub use lower::{compile, run, CompileError, RunResult};
+pub use synth::{
+    build_program, parse_intent, render_q, synthesize, Geometry, Intent, SynthError, Synthesis,
+};
 
 /// Public framing tagline (internal north star is "future of C").
 pub const TAGLINE: &str = "quantized fabric compute";

@@ -15,9 +15,14 @@ language for verified compute.
 ## Status
 
 `Q0` (static compiler) — **DONE**. `Q1` (verified effects) — **DONE**. `Q2`
-(self-optimizing via the evolver) — **DONE**. `Q3` (intent → blocks) — planned.
-See `docs/q-language-design.md` for the staged roadmap, `docs/q0-ir-compiler.md`,
-`docs/q1-verified-effects.md`, and `docs/q2-self-optimization.md` for evidence.
+(self-optimizing via the evolver) — **DONE**. `Q3` (intent → verified blocks) —
+**DONE**. See `docs/q-language-design.md` for the staged roadmap and
+`docs/q0-ir-compiler.md`, `docs/q1-verified-effects.md`,
+`docs/q2-self-optimization.md`, and `docs/q3-intent-synthesis.md` for evidence.
+
+All four staged gates are complete. `binetic-q synth <file.intent>` compiles a
+structured intent into a checked, receipt-verified `.q` program. Natural-language
+intent synthesis remains a future input adapter and is not claimed.
 
 A receipt demand is now a compile-time effect: `@receipt L3` over a stage with
 no replay oracle is rejected at `check` time, naming the offending stage.

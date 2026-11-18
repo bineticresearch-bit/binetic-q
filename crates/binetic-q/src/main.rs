@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 
 use binetic_evolver::LaneScaledThroughput;
-use binetic_q::{check, compile, optimize, parser::Parser, receipt_effect, run, OptimizeConfig};
+use binetic_q::{
+    check, compile, optimize, parser::Parser, receipt_effect, run, synthesize, OptimizeConfig,
+};
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -26,13 +28,16 @@ enum Command {
         population: usize,
         seed: u64,
     },
+    Synth {
+        source: PathBuf,
+    },
 }
 
 fn parse_args() -> Result<Command, String> {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(|s| s.as_str()).unwrap_or("");
     let source = args.get(2).ok_or_else(|| {
-        "usage: binetic-q <check|compile|run|optimize> <file.q> [flags]".to_string()
+        "usage: binetic-q <check|compile|run|optimize|synth> <file.q|.intent> [flags]".to_string()
     })?;
     let source = PathBuf::from(source);
     let flag = |name: &str, default: &str| -> Result<String, String> {
@@ -60,8 +65,9 @@ fn parse_args() -> Result<Command, String> {
                 .parse()
                 .map_err(|_| "bad --seed".to_string())?,
         }),
+        "synth" => Ok(Command::Synth { source }),
         other => Err(format!(
-            "unknown command {other:?}; use check|compile|run|optimize"
+            "unknown command {other:?}; use check|compile|run|optimize|synth"
         )),
     }
 }
@@ -94,6 +100,20 @@ struct RunJson {
     level2: bool,
     level3: bool,
     all_valid: bool,
+}
+
+#[derive(Serialize)]
+struct SynthJson {
+    intent: String,
+    geometry: String,
+    stages: usize,
+    source: String,
+    plan_hash: String,
+    chain_root: String,
+    packets: usize,
+    receipt_bytes: u64,
+    demand_level: String,
+    all_levels_valid: bool,
 }
 
 #[derive(Serialize)]
@@ -181,6 +201,30 @@ fn real_main() -> Result<(), String> {
                     level2: r.report.level2,
                     level3: r.report.level3,
                     all_valid: r.report.all_valid,
+                })
+                .unwrap()
+            );
+        }
+        Command::Synth { source } => {
+            let src = read_source(&source)?;
+            let s = synthesize(&src).map_err(|e| format!("synth: {e}"))?;
+            println!(
+                "{}",
+                serde_json::to_string(&SynthJson {
+                    intent: s.intent,
+                    geometry: match s.geometry {
+                        binetic_q::Geometry::Fixed => "fixed",
+                        binetic_q::Geometry::Optimize => "optimize",
+                    }
+                    .to_string(),
+                    stages: s.program.stages.len(),
+                    source: s.source,
+                    plan_hash: hex(&s.plan_hash),
+                    chain_root: hex(&s.chain_root),
+                    packets: s.packet_count,
+                    receipt_bytes: s.receipt_bytes,
+                    demand_level: s.program.demand.as_str().to_string(),
+                    all_levels_valid: s.verified.iter().all(|&b| b),
                 })
                 .unwrap()
             );

@@ -1,6 +1,6 @@
 # Binetic Q — language design
 
-Status: DESIGN/IMPLEMENTATION (Q0 + Q1 + Q2 shipped; Q3 staged). Owner: parent.
+Status: DESIGN/IMPLEMENTATION (Q0 + Q1 + Q2 + Q3 shipped). Owner: parent.
 
 ## The one abstraction
 
@@ -66,7 +66,12 @@ Evidence: `docs/q1-verified-effects.md`.
   by verified throughput (receipts under a replay oracle), optimizing
   `lane_width`/`tile_size`/`node_count` like `FabricFitnessFn` does today.
   Evidence: `docs/q2-self-optimization.md`.
-- **Q3 — intent synthesis** (destination): natural-language / demo → Qblocks.
+- **Q3 — intent synthesis** (DONE): structured declarative intent → verified
+  `.q` programs. Synthesizes only programs that pass Q1's effect check and Q2's
+  real-fabric verification; emitted source re-parses and reproduces the same
+  plan/chain roots. Optional `geometry optimize` routes through Q2. Evidence:
+  `docs/q3-intent-synthesis.md`. A natural-language/LLM front-end that emits the
+  structured intent is a future input adapter, not claimed here.
 
 ## Open questions
 
