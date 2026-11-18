@@ -43,8 +43,8 @@ pub use evolve::{
 pub use fitness::{default_throughput, optimize, OptimizeConfig, OptimizeResult, QFitnessFn};
 pub use ir::{receipt_effect, DType, Kernel, Level, QGraph, QProgram, Qblock, Stage, TensorType};
 pub use kernels::{
-    receipt_effect_with, DotKernel, FabricKernel, FwhtKernel, GateKernel, KernelRegistry,
-    KernelSpec, QKernel, ReplayOracle,
+    receipt_effect_with, DotKernel, DotOracle, FabricKernel, FwhtKernel, FwhtOracle, GateKernel,
+    GateOracle, KernelRegistry, KernelSpec, QKernel, ReplayOracle,
 };
 pub use lower::{compile, run, run_with, CompileError, RunError, RunResult, StageReceipt};
 pub use synth::{

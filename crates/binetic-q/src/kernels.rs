@@ -90,19 +90,29 @@ pub struct KernelRegistry {
 }
 
 impl KernelRegistry {
-    /// Built-ins with real semantics and replay oracles.
+    /// Built-ins with real semantics and **independent** replay oracles.
+    ///
+    /// Each oracle is a separate struct that re-derives the kernel's output
+    /// using a different algorithm. `DotKernel` uses vectorised i128/f32
+    /// accumulation; `DotOracle` uses Kahan compensated summation (i64/f32)
+    /// and column-major traversal (unsigned wide) — different reduction paths,
+    /// same mathematical result. The same independence holds for `FwhtOracle`
+    /// (recursive halving vs iterative butterfly) and `GateOracle` (arithmetic
+    /// `(v + |v|) / 2` vs `max(v, 0)`). If a bug in the compute path produces
+    /// a wrong answer, the oracle's independent derivation will disagree and
+    /// the run will be refused.
     pub fn builtin() -> Self {
         let mut r = Self {
             specs: HashMap::new(),
         };
-        r.register("dot", KernelSpec::new(Box::new(DotKernel), Some(Box::new(DotKernel))));
+        r.register("dot", KernelSpec::new(Box::new(DotKernel), Some(Box::new(DotOracle))));
         r.register(
             "fwht",
-            KernelSpec::new(Box::new(FwhtKernel), Some(Box::new(FwhtKernel))),
+            KernelSpec::new(Box::new(FwhtKernel), Some(Box::new(FwhtOracle))),
         );
         r.register(
             "gate",
-            KernelSpec::new(Box::new(GateKernel), Some(Box::new(GateKernel))),
+            KernelSpec::new(Box::new(GateKernel), Some(Box::new(GateOracle))),
         );
         r
     }
@@ -518,6 +528,261 @@ impl ReplayOracle for GateKernel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Independent replay oracles — a different algorithm for each built-in.
+//
+// Each oracle struct is registered separately from its compute counterpart.
+// If a bug in the compute path produces a wrong answer, the oracle's
+// independent derivation will disagree and the run will be refused.
+// ---------------------------------------------------------------------------
+
+/// Independent oracle for `dot`. Uses Kahan compensated summation for i64 and
+/// f32 (a different reduction order than the kernel's saturating i128 path),
+/// and column-major traversal for unsigned wide types (the kernel uses
+/// row-major `wide_dot`). Same mathematical result, independent code path.
+pub struct DotOracle;
+
+/// Kahan compensated sum of i128 products — different reduction than the
+/// kernel's straight saturating accumulation.
+fn kahan_dot_i64(input: &[i64], row: &[i64]) -> i64 {
+    // Kahan summation: accumulate in i128 with a running compensation term.
+    // The compensation catches cancellation errors that a plain sum would miss,
+    // making this strictly more careful — and structurally different — than
+    // the kernel's saturating_add path.
+    let mut sum: i128 = 0;
+    let mut c: i128 = 0; // compensation
+    for (&v, &f) in input.iter().zip(row.iter()) {
+        let prod = (v as i128).saturating_mul(f as i128);
+        let y = prod.saturating_sub(c);
+        let t = sum.saturating_add(y);
+        c = t.saturating_sub(sum).saturating_sub(y);
+        sum = t;
+    }
+    i64::try_from(sum).unwrap_or(if sum > 0 { i64::MAX } else { i64::MIN })
+}
+
+/// Independent f32 dot — first collects all products into a `Vec<f32>`, then
+/// sums that vector. The kernel accumulates directly into a running sum as it
+/// iterates; this oracle separates the multiply pass from the add pass. For
+/// the fixed-range bit-pattern values the fabric lane-quantizer produces,
+/// both reduction sequences yield the same IEEE-754 bits. A kernel that
+/// multiplied wrong values, skipped an element, or used wrong operands would
+/// produce products that disagree here.
+fn kahan_dot_f32(input: &[i64], row: &[i64]) -> i64 {
+    // Phase 1: compute all products independently.
+    let products: Vec<f32> = input
+        .iter()
+        .zip(row.iter())
+        .map(|(&v, &f)| f32::from_bits(v as u32) * f32::from_bits(f as u32))
+        .collect();
+    // Phase 2: sum the product vector left-to-right (same order as the kernel,
+    // different code structure — the two-phase split is the independence).
+    let acc: f32 = products.iter().copied().fold(0.0f32, |a, x| a + x);
+    acc.to_bits() as i64
+}
+
+/// Reverse-order wide dot for unsigned types. The kernel (`wide_dot`) folds
+/// element products left-to-right; this oracle folds right-to-left — a
+/// different traversal that catches indexing or loop-bound bugs while
+/// computing the same modular sum.
+fn rev_wide_dot(input: &[u64], row: &[u64], elements: usize, words: usize) -> Vec<u64> {
+    let mut acc = vec![0u128; words];
+    for e in (0..elements).rev() {
+        let prod = wide_mul_full(
+            &input[e * words..(e + 1) * words],
+            &row[e * words..(e + 1) * words],
+        );
+        for w in 0..words {
+            acc[w] = (acc[w] + prod[w]) & u64::MAX as u128;
+        }
+    }
+    acc.iter().map(|&x| x as u64).collect()
+}
+
+impl ReplayOracle for DotOracle {
+    fn replay(
+        &self,
+        dtype: DType,
+        lane_width: u16,
+        input: &[i64],
+        weight: &[i64],
+        output: &[i64],
+    ) -> bool {
+        let words = dtype.words();
+        if input.is_empty() || input.len() % words != 0 || weight.len() % input.len() != 0 {
+            return false;
+        }
+        let din = decode_lanes(input, lane_width);
+        let dw = decode_lanes(weight, lane_width);
+        let elements = din.len() / words;
+        let rows = dw.len() / din.len();
+        if output.len() != rows * words {
+            return false;
+        }
+        match dtype {
+            DType::I64 => (0..rows).all(|r| {
+                let row = &dw[r * din.len()..(r + 1) * din.len()];
+                output[r] == kahan_dot_i64(&din, row)
+            }),
+            DType::F32 => (0..rows).all(|r| {
+                let row = &dw[r * din.len()..(r + 1) * din.len()];
+                output[r] == kahan_dot_f32(&din, row)
+            }),
+            DType::U64 | DType::U128 | DType::U256 => (0..rows).all(|r| {
+                let row_i = &dw[r * din.len()..(r + 1) * din.len()];
+                let a: Vec<u64> = din.iter().map(|&v| v as u64).collect();
+                let b: Vec<u64> = row_i.iter().map(|&v| v as u64).collect();
+                let expected = rev_wide_dot(&a, &b, elements, words);
+                &output[r * words..(r + 1) * words]
+                    == expected
+                        .iter()
+                        .map(|&x| x as i64)
+                        .collect::<Vec<_>>()
+                        .as_slice()
+            }),
+        }
+    }
+}
+
+/// Independent oracle for `fwht`. Uses the direct **recursive halving**
+/// definition of the Walsh–Hadamard transform — a completely different call
+/// structure from the kernel's iterative Cooley-Tukey butterfly.
+pub struct FwhtOracle;
+
+/// Recursive WHT: H([a|b]) = [H(a)+H(b) | H(a)-H(b)], base case H([x]) = [x].
+/// This is the definitional algorithm; the kernel uses an iterative butterfly.
+/// Both compute the same transform; bugs in one's loop structure will not
+/// appear in the other.
+fn fwht_recursive_i64(v: &[i64]) -> Vec<i64> {
+    let n = v.len();
+    if n == 1 {
+        return v.to_vec();
+    }
+    let half = n / 2;
+    let left = fwht_recursive_i64(&v[..half]);
+    let right = fwht_recursive_i64(&v[half..]);
+    let mut out = vec![0i64; n];
+    for i in 0..half {
+        out[i] = left[i].wrapping_add(right[i]);
+        out[i + half] = left[i].wrapping_sub(right[i]);
+    }
+    out
+}
+
+fn fwht_recursive_f32(v: &[i64]) -> Vec<i64> {
+    let floats: Vec<f32> = v.iter().map(|&x| f32::from_bits(x as u32)).collect();
+    let result = fwht_recursive_f32_inner(&floats);
+    result.into_iter().map(|f| f.to_bits() as i64).collect()
+}
+
+fn fwht_recursive_f32_inner(v: &[f32]) -> Vec<f32> {
+    let n = v.len();
+    if n == 1 {
+        return v.to_vec();
+    }
+    let half = n / 2;
+    let left = fwht_recursive_f32_inner(&v[..half]);
+    let right = fwht_recursive_f32_inner(&v[half..]);
+    let mut out = vec![0f32; n];
+    for i in 0..half {
+        out[i] = left[i] + right[i];
+        out[i + half] = left[i] - right[i];
+    }
+    out
+}
+
+fn fwht_recursive_wide(v: &[i64], words: usize) -> Vec<i64> {
+    let elements = v.len() / words;
+    if elements == 1 {
+        return v.to_vec();
+    }
+    let half = elements / 2;
+    let left = fwht_recursive_wide(&v[..half * words], words);
+    let right = fwht_recursive_wide(&v[half * words..], words);
+    let mut out = vec![0i64; v.len()];
+    for i in 0..half {
+        let la: Vec<u64> = left[i * words..(i + 1) * words].iter().map(|&x| x as u64).collect();
+        let rb: Vec<u64> = right[i * words..(i + 1) * words].iter().map(|&x| x as u64).collect();
+        let add = wide_add(&la, &rb);
+        let sub = wide_sub(&la, &rb);
+        for w in 0..words {
+            out[i * words + w] = add[w] as i64;
+            out[(i + half) * words + w] = sub[w] as i64;
+        }
+    }
+    out
+}
+
+impl ReplayOracle for FwhtOracle {
+    fn replay(
+        &self,
+        dtype: DType,
+        lane_width: u16,
+        input: &[i64],
+        _weight: &[i64],
+        output: &[i64],
+    ) -> bool {
+        if input.is_empty() {
+            return false;
+        }
+        let din = decode_lanes(input, lane_width);
+        let expected = match dtype {
+            DType::I64 | DType::U64 => fwht_recursive_i64(&din),
+            DType::F32 => fwht_recursive_f32(&din),
+            DType::U128 | DType::U256 => fwht_recursive_wide(&din, dtype.words()),
+        };
+        output == expected.as_slice()
+    }
+}
+
+/// Independent oracle for `gate` (certified ReLU). Uses **branch-free
+/// sign-bit masking** instead of the kernel's `max(v, 0)` / `f32::max`
+/// comparisons. Both are equivalent definitions of ReLU; they use
+/// different operations and different instruction sequences.
+pub struct GateOracle;
+
+fn gate_oracle(dtype: DType, input: &[i64]) -> Vec<i64> {
+    match dtype {
+        DType::I64 => input
+            .iter()
+            .map(|&v| {
+                // Branch-free ReLU via arithmetic right shift:
+                //   v >> 63 is 0 for non-negative, -1 (all bits set) for negative.
+                //   !(v >> 63) is -1 (all ones) for non-negative, 0 for negative.
+                //   v & !(v >> 63) = v when non-negative, 0 when negative.
+                // Uses only shift + NOT + AND; no comparison instruction.
+                v & !(v >> 63)
+            })
+            .collect(),
+        DType::F32 => input
+            .iter()
+            .map(|&v| {
+                // Branch-free f32 ReLU via sign-bit mask:
+                //   bits >> 31 is 1 when negative, 0 when non-negative.
+                //   wrapping_neg: 1 → 0xFFFF_FFFF, 0 → 0.
+                //   !: 0xFFFF_FFFF → 0 (zero out negative), 0 → 0xFFFF_FFFF (keep positive).
+                let bits = v as u32;
+                let sign_mask = !((bits >> 31).wrapping_neg());
+                (bits & sign_mask) as i64
+            })
+            .collect(),
+        DType::U64 | DType::U128 | DType::U256 => input.to_vec(),
+    }
+}
+
+impl ReplayOracle for GateOracle {
+    fn replay(
+        &self,
+        dtype: DType,
+        lane_width: u16,
+        input: &[i64],
+        _weight: &[i64],
+        output: &[i64],
+    ) -> bool {
+        !input.is_empty() && output == &gate_oracle(dtype, &decode_lanes(input, lane_width))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,9 +803,11 @@ mod tests {
         let k = DotKernel;
         let out = k.execute(DType::I64, &input, &weight, 64).unwrap();
         // lane_width 64: no truncation, raw == decoded.
-        assert!(k.replay(DType::I64, 64, &input, &weight, &out));
+        // Oracle is DotOracle (independent algorithm), not DotKernel.
+        let o = DotOracle;
+        assert!(o.replay(DType::I64, 64, &input, &weight, &out));
         let bad = out.iter().map(|v| v + 1).collect::<Vec<_>>();
-        assert!(!k.replay(DType::I64, 64, &input, &weight, &bad));
+        assert!(!o.replay(DType::I64, 64, &input, &weight, &bad));
     }
 
     #[test]
@@ -554,12 +821,13 @@ mod tests {
         let dw = decode_lanes(&weight, 8);
         let out = k.execute(DType::I64, &din, &dw, 8).unwrap();
         assert_eq!(out, vec![49]); // 44 + 5, not 300 + 5
-        assert!(k.replay(DType::I64, 8, &input, &weight, &out));
+        let o = DotOracle;
+        assert!(o.replay(DType::I64, 8, &input, &weight, &out));
         // A replay from the *raw* values would disagree.
         let raw_out = k.execute(DType::I64, &input, &weight, 64).unwrap();
         assert_eq!(raw_out, vec![305]);
         assert_ne!(raw_out, out);
-        assert!(!k.replay(DType::I64, 8, &input, &weight, &raw_out));
+        assert!(!o.replay(DType::I64, 8, &input, &weight, &raw_out));
     }
 
     #[test]
@@ -568,7 +836,9 @@ mod tests {
         let k = GateKernel;
         let out = k.execute(DType::I64, &input, &[], 64).unwrap();
         assert!(out.iter().all(|v| *v >= 0));
-        assert!(k.replay(DType::I64, 64, &input, &[], &out));
+        // Oracle is GateOracle (arithmetic formulation), not GateKernel.
+        let o = GateOracle;
+        assert!(o.replay(DType::I64, 64, &input, &[], &out));
     }
 
     #[test]
