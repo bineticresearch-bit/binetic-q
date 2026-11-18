@@ -63,10 +63,13 @@ cargo test            # 10 unit + 1 G0 integration test
 
 ## Dependency wiring
 
-For development, the substrate crates (`binetic-core`, `binetic-fabric`,
-`binetic-verify`) are path dependencies into a sibling `binetic-core` checkout.
-For the public release these switch to git dependencies pinned to
-`binetic-engine`, so the built Q compiler carries its own pinned substrate.
+The substrate crates (`binetic-core`, `binetic-fabric`, `binetic-verify`) are
+git dependencies pinned by `rev` to `binetic-engine`. The pin
+(`2e13a913bd00505998c63d7882f6d18e7b661bbe`) is the first substrate commit that
+carries the L2/L3 replay and chain-linking fixes G0's receipt proof depends on,
+so a plain `cargo build` from a fresh clone reproduces the proof without any
+sibling checkout. Bump the `rev` in `Cargo.toml` when the substrate advances,
+and re-run `cargo test` to confirm the proof still holds.
 
 ## License
 

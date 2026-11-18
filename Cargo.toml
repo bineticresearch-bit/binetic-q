@@ -9,13 +9,12 @@ license = "LicenseRef-Proprietary"
 repository = "https://github.com/bineticresearch-bit/binetic-q"
 
 [workspace.dependencies]
-# Development wiring: path deps to the local substrate so Q0 builds against
-# the L2/L3 + chain-linking fixes. On release these switch to git deps pinned
-# to binetic-engine (see README "Dependency wiring").
-binetic-core = { path = "../binetic-core/binetic/rust/crates/binetic-core" }
-binetic-fabric = { path = "../binetic-core/binetic/rust/crates/binetic-fabric" }
-binetic-verify = { path = "../binetic-core/binetic/rust/crates/binetic-verify" }
-binetic-evolver = { path = "../binetic-core/binetic/rust/crates/binetic-evolver" }
+# Pinned to the substrate commit that carries the L2/L3 replay + chain-linking
+# fixes Q0's G0 proof depends on. Cargo resolves each crate by name from the
+# binetic-engine workspace; bump the rev when the substrate advances.
+binetic-core = { git = "https://github.com/bineticresearch-bit/binetic-engine.git", rev = "2e13a913bd00505998c63d7882f6d18e7b661bbe" }
+binetic-fabric = { git = "https://github.com/bineticresearch-bit/binetic-engine.git", rev = "2e13a913bd00505998c63d7882f6d18e7b661bbe" }
+binetic-verify = { git = "https://github.com/bineticresearch-bit/binetic-engine.git", rev = "2e13a913bd00505998c63d7882f6d18e7b661bbe" }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

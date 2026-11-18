@@ -64,5 +64,6 @@ Recorded 2026-11-17 on macOS arm64, rustc 1.100.0:
   compiler→receipt path, not kernel semantics.
 - `@receipt L2`/`L3` are satisfied at run time by a replay oracle; Q0's checker
   does not yet reject impossible demands statically — that is Q1.
-- Substrate deps are path dependencies for development; release pinning is
-  pending.
+- Substrate deps are git-pinned by `rev` to `binetic-engine`
+  (`2e13a913bd00505998c63d7882f6d18e7b661bbe`), so a fresh clone reproduces
+  the proof. The gate table above was recorded against this pin.

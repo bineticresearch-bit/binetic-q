@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "binetic-core"
 version = "0.1.0"
+source = "git+https://github.com/bineticresearch-bit/binetic-engine.git?rev=2e13a913bd00505998c63d7882f6d18e7b661bbe#2e13a913bd00505998c63d7882f6d18e7b661bbe"
 dependencies = [
  "crc32fast",
  "serde",
@@ -15,6 +16,7 @@ dependencies = [
 [[package]]
 name = "binetic-fabric"
 version = "0.1.0"
+source = "git+https://github.com/bineticresearch-bit/binetic-engine.git?rev=2e13a913bd00505998c63d7882f6d18e7b661bbe#2e13a913bd00505998c63d7882f6d18e7b661bbe"
 dependencies = [
  "binetic-core",
  "thiserror",
@@ -35,6 +37,7 @@ dependencies = [
 [[package]]
 name = "binetic-verify"
 version = "0.1.0"
+source = "git+https://github.com/bineticresearch-bit/binetic-engine.git?rev=2e13a913bd00505998c63d7882f6d18e7b661bbe#2e13a913bd00505998c63d7882f6d18e7b661bbe"
 dependencies = [
  "binetic-core",
 ]
