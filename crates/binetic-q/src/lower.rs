@@ -223,14 +223,46 @@ pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResu
         .map(|p| p.vport_id)
         .ok_or(RunError::NoPorts)?;
 
-    let input_len = program.param_ty.len();
     let dtype = program.param_ty.dtype;
     let lane_width = program.config.lane_width;
-    let mut input = initial_input(program);
-    let mut output = input.clone();
+    let initial = initial_input(program);
+
+    // Name → lane value map. Starts with the program parameter, then gains
+    // one entry per stage. Multi-input stages element-wise sum their inputs
+    // before the kernel sees them, keeping lane count fixed at param_ty.lane_len().
+    let mut values: std::collections::HashMap<String, Vec<i64>> = std::collections::HashMap::new();
+    values.insert(program.param.clone(), initial);
+
+    let mut output = Vec::new();
     let mut stage_receipts: Vec<StageReceipt> = Vec::new();
 
     for stage in &program.stages {
+        // Resolve this stage's inputs from the value map. A single-input stage
+        // behaves exactly as before. For a multi-input (skip-connection) stage,
+        // the inputs are element-wise summed (wrapping) to a single lane
+        // vector — the fabric port geometry stays fixed at param_ty.lane_len().
+        // This is the standard residual-connection merge: skip + predecessor.
+        let input: Vec<i64> = if stage.inputs.is_empty() {
+            return Err(RunError::Fabric(format!(
+                "stage {:?} has no inputs",
+                stage.name
+            )));
+        } else {
+            let mut acc: Vec<i64> = values
+                .get(&stage.inputs[0])
+                .cloned()
+                .unwrap_or_default();
+            for name in stage.inputs.iter().skip(1) {
+                if let Some(v) = values.get(name) {
+                    for (a, b) in acc.iter_mut().zip(v.iter()) {
+                        *a = a.wrapping_add(*b);
+                    }
+                }
+            }
+            acc
+        };
+
+        let input_len = program.param_ty.len();
         let weight = stage_weight(program, stage, input_len);
         // Kernel from the registry: real semantics + earned guarantee.
         // Unregistered Custom kernels fall back to the documented
@@ -263,8 +295,15 @@ pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResu
             kernel: stage.kernel.to_string(),
             replayed,
         });
-        input = output.clone();
+        values.insert(stage.name.clone(), output.clone());
     }
+
+    // Resolve the emitted value from the map (may differ from the last stage
+    // if emit names an earlier stage — valid in a DAG).
+    output = values
+        .get(&program.emit)
+        .cloned()
+        .unwrap_or(output);
 
     // Use the plan hash cached at build time. `compute_plan_hash` folds each
     // port's mutable state/receipt head, so recomputing after execution would

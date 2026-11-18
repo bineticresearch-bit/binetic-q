@@ -59,12 +59,22 @@ impl MutationFn for DefaultMutation {
     }
 }
 
-/// The evolvable part of a program: kernel pipeline + weights + geometry.
-/// The contract (port types, receipt demand) is fixed by the intent.
+/// The evolvable part of a program: kernel pipeline + weights + geometry +
+/// skip-connection wiring.
+///
+/// `skip[i]` is an optional index `j < i` meaning stage `i` takes *both* its
+/// predecessor's output *and* stage `j`'s output as inputs — a residual
+/// (skip) connection. `None` means stage `i` is a simple linear stage.
+/// This is the minimal DAG extension: every pipeline is a valid genome with
+/// all-`None` skips, and the evolver can add/remove/retarget wires without
+/// changing any pipeline-only machinery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructureGenome {
     pub kernels: Vec<Kernel>,
     pub weights: Vec<i64>,
+    /// Per-stage optional skip-connection source index. `skip[i] = Some(j)`
+    /// adds stage `j`'s output as a second input to stage `i` (j < i).
+    pub skip: Vec<Option<usize>>,
     pub lane_width: u16,
     pub tile_size: u32,
     pub node_count: u32,
@@ -88,8 +98,12 @@ impl StructureGenome {
     fn cmp_structure(&self, other: &Self) -> Ordering {
         let ka: Vec<(u8, String)> = self.kernels.iter().map(kernel_ord).collect();
         let kb: Vec<(u8, String)> = other.kernels.iter().map(kernel_ord).collect();
+        // Compare skip as Vec<u8>: None → 0xFF, Some(j) → j as u8 + 1.
+        let sa: Vec<u8> = self.skip.iter().map(|s| s.map(|j| j as u8 + 1).unwrap_or(0xFF)).collect();
+        let sb: Vec<u8> = other.skip.iter().map(|s| s.map(|j| j as u8 + 1).unwrap_or(0xFF)).collect();
         ka.cmp(&kb)
             .then_with(|| self.weights.cmp(&other.weights))
+            .then_with(|| sa.cmp(&sb))
             .then_with(|| self.lane_width.cmp(&other.lane_width))
             .then_with(|| self.tile_size.cmp(&other.tile_size))
             .then_with(|| self.node_count.cmp(&other.node_count))
@@ -98,11 +112,13 @@ impl StructureGenome {
 
     fn random(rng: &mut DeterministicRng, kernels: &[Kernel], max_stages: usize) -> Self {
         let n = 1 + rng.index(max_stages);
+        // Random genomes start with no skip connections; the mutator adds them.
         Self {
             kernels: (0..n)
                 .map(|_| kernels[rng.index(kernels.len())].clone())
                 .collect(),
             weights: (0..n).map(|_| (rng.next_u64() % 997) as i64).collect(),
+            skip: vec![None; n],
             lane_width: LANE_WIDTHS[rng.index(LANE_WIDTHS.len())],
             tile_size: (MIN_TILE_SIZE
                 + (rng.next_u64() % (MAX_TILE_SIZE - MIN_TILE_SIZE + 1) as u64) as u32),
@@ -113,6 +129,8 @@ impl StructureGenome {
     }
 
     /// One mutation: exactly one graph or geometry operator is applied.
+    /// Operators 0–4 are pipeline/topology mutations; operator 5 is geometry;
+    /// operators 6–7 are skip-connection mutations (add/remove/retarget).
     fn mutate(
         &self,
         rng: &mut DeterministicRng,
@@ -120,7 +138,7 @@ impl StructureGenome {
         kernels: &[Kernel],
     ) -> Self {
         let mut child = self.clone();
-        match rng.index(6) {
+        match rng.index(8) {
             0 => {
                 // Retarget a stage's kernel.
                 let i = rng.index(child.kernels.len());
@@ -137,6 +155,15 @@ impl StructureGenome {
                     let i = rng.index(child.kernels.len() + 1);
                     child.kernels.insert(i, kernels[rng.index(kernels.len())].clone());
                     child.weights.insert(i, (rng.next_u64() % 997) as i64);
+                    child.skip.insert(i, None);
+                    // Any existing skip that pointed at or past i must shift.
+                    for s in child.skip.iter_mut() {
+                        if let Some(j) = s {
+                            if *j >= i {
+                                *j += 1;
+                            }
+                        }
+                    }
                 }
             }
             3 => {
@@ -145,6 +172,16 @@ impl StructureGenome {
                     let i = rng.index(child.kernels.len());
                     child.kernels.remove(i);
                     child.weights.remove(i);
+                    child.skip.remove(i);
+                    // Clear any skip that pointed at the removed stage or now
+                    // has an invalid source (would be its own predecessor or later).
+                    for (idx, s) in child.skip.iter_mut().enumerate() {
+                        if let Some(j) = *s {
+                            if j >= i || j >= idx {
+                                *s = None;
+                            }
+                        }
+                    }
                 }
             }
             4 => {
@@ -157,9 +194,13 @@ impl StructureGenome {
                     }
                     child.kernels.swap(i, j);
                     child.weights.swap(i, j);
+                    // After a swap, skip connections may be invalid; clear them
+                    // for safety (the mutator will re-add valid ones later).
+                    child.skip[i] = None;
+                    child.skip[j] = None;
                 }
             }
-            _ => {
+            5 => {
                 // Geometry: one field, mirroring the evolver's mutation rules.
                 match rng.index(4) {
                     0 => child.lane_width = LANE_WIDTHS[rng.index(LANE_WIDTHS.len())],
@@ -189,11 +230,38 @@ impl StructureGenome {
                     }
                 }
             }
+            6 => {
+                // Add or retarget a skip connection. Pick a stage i > 0 and
+                // wire it to some earlier stage j < i.
+                if child.kernels.len() > 1 {
+                    let i = 1 + rng.index(child.kernels.len() - 1); // 1..n-1
+                    let j = rng.index(i); // 0..i-1
+                    child.skip[i] = Some(j);
+                }
+            }
+            _ => {
+                // Remove a skip connection: clear one that is currently set.
+                let candidates: Vec<usize> = child
+                    .skip
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.is_some())
+                    .map(|(i, _)| i)
+                    .collect();
+                if !candidates.is_empty() {
+                    let i = candidates[rng.index(candidates.len())];
+                    child.skip[i] = None;
+                }
+            }
         }
         child
     }
 
     /// Lower this structure to a `QProgram` under the fixed contract.
+    ///
+    /// A stage with `skip[i] = Some(j)` takes two inputs: its linear
+    /// predecessor's output *and* stage `j`'s output — a residual connection.
+    /// The lowerer concatenates multi-input values before passing to the kernel.
     pub fn program(
         &self,
         name: &str,
@@ -201,25 +269,53 @@ impl StructureGenome {
         output_ty: &TensorType,
         demand: Level,
     ) -> QProgram {
+        // Build the name sequence: "x", "s0", "s1", ...
+        let stage_names: Vec<String> = (0..self.kernels.len()).map(|i| format!("s{i}")).collect();
+
         let mut stages = Vec::new();
-        let mut prev = "x".to_string();
-        for (i, (kernel, weight)) in self.kernels.iter().zip(self.weights.iter()).enumerate() {
-            let stage_name = format!("s{i}");
+        for (i, ((kernel, weight), stage_name)) in self
+            .kernels
+            .iter()
+            .zip(self.weights.iter())
+            .zip(stage_names.iter())
+            .enumerate()
+        {
+            // Primary input: the previous stage's output (or the program param).
+            let prev = if i == 0 {
+                "x".to_string()
+            } else {
+                stage_names[i - 1].clone()
+            };
+            let mut inputs = vec![prev];
+
+            // Skip connection: add an earlier stage's output as a second input.
+            // skip[i] = Some(j) means stage j's output ("s{j}") feeds stage i.
+            if let Some(j) = self.skip[i] {
+                if j < i {
+                    let src = stage_names[j].clone(); // stage j's output is "s{j}"
+                    // Only add if distinct from the primary input.
+                    if !inputs.contains(&src) {
+                        inputs.push(src);
+                    }
+                }
+            }
+
             stages.push(Stage {
                 name: stage_name.clone(),
                 kernel: kernel.clone(),
-                inputs: vec![prev],
+                inputs,
                 weight: *weight,
             });
-            prev = stage_name;
         }
+
+        let emit = stage_names.last().cloned().unwrap_or_else(|| "x".into());
         QProgram {
             name: name.to_string(),
             param: "x".into(),
             param_ty: param_ty.clone(),
             output_ty: output_ty.clone(),
             stages,
-            emit: prev,
+            emit,
             demand,
             config: ProgramConfig {
                 lane_width: self.lane_width,
@@ -532,6 +628,7 @@ mod tests {
         StructureGenome {
             kernels: vec![Kernel::Dot, Kernel::Gate],
             weights: vec![3, 9],
+            skip: vec![None, None],
             lane_width: 8,
             tile_size: 8,
             node_count: 2,
@@ -582,7 +679,14 @@ mod tests {
             assert!(!child.kernels.is_empty());
             assert!(child.kernels.len() <= 4);
             assert_eq!(child.kernels.len(), child.weights.len());
+            assert_eq!(child.kernels.len(), child.skip.len());
             assert!(LANE_WIDTHS.contains(&child.lane_width));
+            // All skip connections must be valid: skip[i] < i.
+            for (i, s) in child.skip.iter().enumerate() {
+                if let Some(j) = s {
+                    assert!(*j < i, "skip[{i}] = {j} must be < {i}");
+                }
+            }
         }
     }
 

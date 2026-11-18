@@ -12,9 +12,11 @@ const INTENT: &str = include_str!("../examples/pipeline.intent");
 fn initial_from_intent() -> StructureGenome {
     let intent = parse_intent(INTENT).expect("parse intent");
     let starting = binetic_q::build_program(&intent, Default::default());
+    let n = starting.stages.len();
     StructureGenome {
         kernels: starting.stages.iter().map(|s| s.kernel.clone()).collect(),
         weights: starting.stages.iter().map(|s| s.weight).collect(),
+        skip: vec![None; n],
         lane_width: starting.config.lane_width,
         tile_size: starting.config.tile_size,
         node_count: starting.config.node_count,

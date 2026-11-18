@@ -442,6 +442,7 @@ fn real_main() -> Result<(), String> {
             let initial = StructureGenome {
                 kernels: starting.stages.iter().map(|s| s.kernel.clone()).collect(),
                 weights: starting.stages.iter().map(|s| s.weight).collect(),
+                skip: vec![None; starting.stages.len()],
                 lane_width: starting.config.lane_width,
                 tile_size: starting.config.tile_size,
                 node_count: starting.config.node_count,
