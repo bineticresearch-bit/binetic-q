@@ -15,12 +15,18 @@ language for verified compute.
 ## Status
 
 `Q0` (static compiler) — **DONE**. `Q1` (verified effects) — **DONE**. `Q2`
-(self-optimizing via the evolver), `Q3` (intent → blocks) — planned. See
-`docs/q-language-design.md` for the staged roadmap, `docs/q0-ir-compiler.md`
-for the Q0 evidence, and `docs/q1-verified-effects.md` for the Q1 evidence.
+(self-optimizing via the evolver) — **DONE**. `Q3` (intent → blocks) — planned.
+See `docs/q-language-design.md` for the staged roadmap, `docs/q0-ir-compiler.md`,
+`docs/q1-verified-effects.md`, and `docs/q2-self-optimization.md` for evidence.
 
 A receipt demand is now a compile-time effect: `@receipt L3` over a stage with
 no replay oracle is rejected at `check` time, naming the offending stage.
+Q2 searches execution geometry with `binetic-evolver`, scoring each candidate
+only when its real fabric receipts verify at the demanded level:
+
+```bash
+binetic-q optimize examples/three_blocks.q --gen 10 --pop 8 --seed 5150
+```
 
 ## Hello, blocks
 

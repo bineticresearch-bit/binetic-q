@@ -1,6 +1,6 @@
 # Binetic Q — language design
 
-Status: DESIGN/IMPLEMENTATION (Q0 + Q1 shipped; Q2–Q3 staged). Owner: parent.
+Status: DESIGN/IMPLEMENTATION (Q0 + Q1 + Q2 shipped; Q3 staged). Owner: parent.
 
 ## The one abstraction
 
@@ -61,10 +61,11 @@ Evidence: `docs/q1-verified-effects.md`.
 - **Q1 — verified** (DONE): receipts as compiler-enforced effects; kernel
   guarantee registry; weakest-link effect; honest runtime verification.
   Evidence: `docs/q1-verified-effects.md`.
-- **Q2 — self-optimizing** (planned): first implemented intelligence step — a
+- **Q2 — self-optimizing** (DONE): first implemented intelligence step — a
   QGraph-aware `FitnessFn` for `binetic-evolver` that scores a compiled QGraph
   by verified throughput (receipts under a replay oracle), optimizing
   `lane_width`/`tile_size`/`node_count` like `FabricFitnessFn` does today.
+  Evidence: `docs/q2-self-optimization.md`.
 - **Q3 — intent synthesis** (destination): natural-language / demo → Qblocks.
 
 ## Open questions

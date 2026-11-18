@@ -15,6 +15,7 @@ repository = "https://github.com/bineticresearch-bit/binetic-q"
 binetic-core = { git = "https://github.com/bineticresearch-bit/binetic-engine.git", rev = "2e13a913bd00505998c63d7882f6d18e7b661bbe" }
 binetic-fabric = { git = "https://github.com/bineticresearch-bit/binetic-engine.git", rev = "2e13a913bd00505998c63d7882f6d18e7b661bbe" }
 binetic-verify = { git = "https://github.com/bineticresearch-bit/binetic-engine.git", rev = "2e13a913bd00505998c63d7882f6d18e7b661bbe" }
+binetic-evolver = { git = "https://github.com/bineticresearch-bit/binetic-engine.git", rev = "2e13a913bd00505998c63d7882f6d18e7b661bbe" }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

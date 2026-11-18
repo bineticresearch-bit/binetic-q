@@ -15,12 +15,15 @@
 //! - [`lower`] — IR → `PlanConfig` → real `Fabric`; receipts via `binetic-verify`.
 
 pub mod check;
+pub mod fitness;
 pub mod ir;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
 
+pub use binetic_evolver::Fitness;
 pub use check::{check, CheckError};
+pub use fitness::{optimize, OptimizeConfig, OptimizeResult, QFitnessFn};
 pub use ir::{receipt_effect, DType, Kernel, Level, QGraph, QProgram, Qblock, Stage, TensorType};
 pub use lower::{compile, run, CompileError, RunResult};
 

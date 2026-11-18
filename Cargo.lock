@@ -14,6 +14,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "binetic-evolver"
+version = "0.1.0"
+source = "git+https://github.com/bineticresearch-bit/binetic-engine.git?rev=2e13a913bd00505998c63d7882f6d18e7b661bbe#2e13a913bd00505998c63d7882f6d18e7b661bbe"
+dependencies = [
+ "binetic-core",
+ "binetic-fabric",
+ "binetic-verify",
+]
+
+[[package]]
 name = "binetic-fabric"
 version = "0.1.0"
 source = "git+https://github.com/bineticresearch-bit/binetic-engine.git?rev=2e13a913bd00505998c63d7882f6d18e7b661bbe#2e13a913bd00505998c63d7882f6d18e7b661bbe"
@@ -27,6 +37,7 @@ name = "binetic-q"
 version = "0.1.0"
 dependencies = [
  "binetic-core",
+ "binetic-evolver",
  "binetic-fabric",
  "binetic-verify",
  "serde",

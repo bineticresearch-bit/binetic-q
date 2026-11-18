@@ -62,6 +62,8 @@ pub struct RunResult {
     pub plan_hash: [u8; 32],
     pub output: Vec<i64>,
     pub packet_count: usize,
+    /// Sum of serialized receipt bytes, for verified-throughput fitness.
+    pub receipt_bytes: u64,
     pub chain_root: [u8; 32],
     pub report: VerificationReport,
 }
@@ -179,6 +181,10 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
         tree.add(p)
             .map_err(|e| RunError::Fabric(format!("receipt add: {e}")))?;
     }
+    let receipt_bytes = packets
+        .iter()
+        .map(|p| p.to_bytes().map(|b| b.len() as u64).unwrap_or(0))
+        .sum::<u64>();
     let chain_root = tree.chain_root();
     // Only claim replay-backed levels when the program's effect provides them.
     // A Custom-capped program is verified structurally (L0/L1) and reports
@@ -193,6 +199,7 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
         plan_hash,
         output,
         packet_count: packets.len(),
+        receipt_bytes,
         chain_root,
         report,
     })
