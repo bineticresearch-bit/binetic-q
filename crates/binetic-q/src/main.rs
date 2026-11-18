@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use binetic_q::{check, compile, parser::Parser, run};
+use binetic_q::{check, compile, parser::Parser, receipt_effect, run};
 use serde::Serialize;
 
 #[derive(Debug)]
@@ -35,6 +35,7 @@ struct CheckJson {
     program: String,
     stages: usize,
     demand: String,
+    effect: String,
     ok: bool,
 }
 
@@ -88,6 +89,7 @@ fn real_main() -> Result<(), String> {
                     program: p.name.clone(),
                     stages: p.stages.len(),
                     demand: p.demand.as_str().to_string(),
+                    effect: receipt_effect(&p).as_str().to_string(),
                     ok: true,
                 })
                 .unwrap()

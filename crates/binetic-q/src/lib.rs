@@ -21,7 +21,7 @@ pub mod lower;
 pub mod parser;
 
 pub use check::{check, CheckError};
-pub use ir::{DType, Kernel, Level, Qblock, QGraph, QProgram, Stage, TensorType};
+pub use ir::{receipt_effect, DType, Kernel, Level, QGraph, QProgram, Qblock, Stage, TensorType};
 pub use lower::{compile, run, CompileError, RunResult};
 
 /// Public framing tagline (internal north star is "future of C").

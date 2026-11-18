@@ -14,10 +14,13 @@ language for verified compute.
 
 ## Status
 
-`Q0` (static compiler) — **DONE**. `Q1` (verified effects), `Q2`
+`Q0` (static compiler) — **DONE**. `Q1` (verified effects) — **DONE**. `Q2`
 (self-optimizing via the evolver), `Q3` (intent → blocks) — planned. See
-`docs/q-language-design.md` for the staged roadmap and `docs/q0-ir-compiler.md`
-for the Q0 evidence.
+`docs/q-language-design.md` for the staged roadmap, `docs/q0-ir-compiler.md`
+for the Q0 evidence, and `docs/q1-verified-effects.md` for the Q1 evidence.
+
+A receipt demand is now a compile-time effect: `@receipt L3` over a stage with
+no replay oracle is rejected at `check` time, naming the offending stage.
 
 ## Hello, blocks
 

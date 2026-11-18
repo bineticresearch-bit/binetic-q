@@ -1,23 +1,30 @@
 //! Static checker: type, lane, and receipt-effect validation.
 //!
 //! Checks are conservative and deterministic — no I/O, no clock. The checker
-//! is where Q1's receipt effects begin: a program demanding `Lk` is rejected
-//! if a stage cannot satisfy it (Q0 demands are checked against the fabric's
-//! guaranteed L0/L1 plus caller replay intent).
+//! enforces Q1's receipt effects: a program demanding `Lk` is rejected when a
+//! stage cannot guarantee it. A receipt claim is a compile-time type effect,
+//! not a runtime surprise.
 
-use crate::ir::{DType, Level, ProgramConfig, QProgram};
+use crate::ir::{receipt_effect, DType, Level, ProgramConfig, QProgram};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckError {
     EmptyProgram,
-    ShapeMismatch { param: usize, output: usize },
+    ShapeMismatch {
+        param: usize,
+        output: usize,
+    },
     UnsupportedDtype(String),
     UnsupportedLaneWidth(u16),
     BadGeometry(String),
     UnknownName(String),
     DuplicateName(String),
     EmptyPipeline,
-    DemandTooHigh(Level),
+    ReceiptUnsatisfiable {
+        demand: Level,
+        provided: Level,
+        culprit: String,
+    },
     OutputNotProduced(String),
 }
 
@@ -34,7 +41,14 @@ impl std::fmt::Display for CheckError {
             CheckError::UnknownName(s) => write!(f, "unknown name {s:?}"),
             CheckError::DuplicateName(s) => write!(f, "duplicate stage name {s:?}"),
             CheckError::EmptyPipeline => write!(f, "empty pipeline"),
-            CheckError::DemandTooHigh(l) => write!(f, "receipt demand {l} exceeds Q0 guarantee"),
+            CheckError::ReceiptUnsatisfiable {
+                demand,
+                provided,
+                culprit,
+            } => write!(
+                f,
+                "receipt effect error: demand {demand} but stage {culprit:?} only guarantees {provided}"
+            ),
             CheckError::OutputNotProduced(s) => {
                 write!(f, "emit name {s:?} was not produced")
             }
@@ -44,10 +58,9 @@ impl std::fmt::Display for CheckError {
 
 impl std::error::Error for CheckError {}
 
-/// Q0 guarantees L0/L1 structurally; L2/L3 require a replay oracle at runtime
-/// (`verify_with_replay`). The checker accepts any demand — the runner is
-/// responsible for satisfying it — but records that higher demands are
-/// replay-backed (Phase 3 will enforce this as a hard type effect).
+/// Enforce type + geometry + receipt effects. A `@receipt Lk` demand above
+/// the program's computed effect is a compile error: the stage that caps the
+/// guarantee is named in the error so the caller knows which kernel to change.
 pub fn check(program: &QProgram) -> Result<(), CheckError> {
     if program.stages.is_empty() {
         return Err(CheckError::EmptyProgram);
@@ -86,8 +99,21 @@ pub fn check(program: &QProgram) -> Result<(), CheckError> {
         return Err(CheckError::OutputNotProduced(program.emit.clone()));
     }
 
-    // Receipt demand is accepted; L2/L3 are satisfied by replay at run time.
-    let _ = program.demand;
+    // Receipt effect: the demand may not exceed the weakest stage's guarantee.
+    let provided = receipt_effect(program);
+    if program.demand > provided {
+        let culprit = program
+            .stages
+            .iter()
+            .find(|s| s.kernel.guaranteed_level() < program.demand)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "<none>".to_string());
+        return Err(CheckError::ReceiptUnsatisfiable {
+            demand: program.demand,
+            provided,
+            culprit,
+        });
+    }
     Ok(())
 }
 

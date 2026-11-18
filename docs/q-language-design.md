@@ -1,6 +1,6 @@
 # Binetic Q — language design
 
-Status: DESIGN/IMPLEMENTATION (Q0 shipped; Q1–Q3 staged). Owner: parent.
+Status: DESIGN/IMPLEMENTATION (Q0 + Q1 shipped; Q2–Q3 staged). Owner: parent.
 
 ## The one abstraction
 
@@ -45,16 +45,22 @@ Pipeline sugar `a |> f(b)` desugars to `f(a, b)`. Levels are `L0`–`L3`.
 ## Receipts as effects
 
 A `@receipt Lk` demand is a compile-time contract. A result that cannot be
-verified at the demanded level is an error, not a caveat. In Q0 the checker
-accepts any demand and the runner satisfies it via `verify_with_replay`; Q1
-promotes this to a hard type effect checked against each Qblock's
-`BlockContract::min_receipt`.
+verified at the demanded level is an error, not a caveat. Q1 enforces this as a
+hard type effect: each kernel declares its guaranteed receipt level (built-ins
+`dot`/`fwht`/`gate` → L3; an unregistered `Custom` kernel → L1), the program's
+effect is the weakest stage in its pipeline, and `check()` rejects any demand
+above that effect — naming the stage that caps it. The runner then verifies at
+exactly the level the effect guarantees, so a Custom-capped program reports
+`level2/level3 = false` rather than claiming a replay it did not perform.
+Evidence: `docs/q1-verified-effects.md`.
 
 ## Roadmap
 
 - **Q0 — static** (DONE): IR, lexer, parser, checker, lowering to `Fabric`,
   reproducible `plan_hash`, L0–L3 receipts. Evidence: `docs/q0-ir-compiler.md`.
-- **Q1 — verified** (planned): receipts as enforced types; typed wire schemas.
+- **Q1 — verified** (DONE): receipts as compiler-enforced effects; kernel
+  guarantee registry; weakest-link effect; honest runtime verification.
+  Evidence: `docs/q1-verified-effects.md`.
 - **Q2 — self-optimizing** (planned): first implemented intelligence step — a
   QGraph-aware `FitnessFn` for `binetic-evolver` that scores a compiled QGraph
   by verified throughput (receipts under a replay oracle), optimizing

@@ -12,7 +12,7 @@ use binetic_fabric::{
 };
 use binetic_verify::{ReceiptTree, VerificationReport};
 
-use crate::ir::{QProgram, Stage};
+use crate::ir::{receipt_effect, Level, QProgram, Stage};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
@@ -180,7 +180,14 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
             .map_err(|e| RunError::Fabric(format!("receipt add: {e}")))?;
     }
     let chain_root = tree.chain_root();
-    let report = tree.verify_with_replay(replay_oracle);
+    // Only claim replay-backed levels when the program's effect provides them.
+    // A Custom-capped program is verified structurally (L0/L1) and reports
+    // level2/level3 = false, matching what `check` statically guaranteed.
+    let report = if receipt_effect(program) >= Level::L2 {
+        tree.verify_with_replay(replay_oracle)
+    } else {
+        tree.verify()
+    };
 
     Ok(RunResult {
         plan_hash,

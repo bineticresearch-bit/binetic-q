@@ -234,3 +234,82 @@ impl Default for ProgramConfig {
 
 /// A source-level name → block index map used by the checker/lowerer.
 pub type SymbolTable = HashMap<String, usize>;
+
+impl Kernel {
+    /// The strongest receipt level this kernel can guarantee.
+    ///
+    /// Built-ins have a registered replay oracle, so their committed state
+    /// transition can be independently re-derived (L2/L3). A `Custom` kernel
+    /// has no registered oracle: the fabric still gives it per-packet
+    /// integrity (L0) and chain structure (L1), but no replay guarantee.
+    pub fn guaranteed_level(&self) -> Level {
+        match self {
+            Kernel::Dot | Kernel::Fwht | Kernel::Gate => Level::L3,
+            Kernel::Custom(_) => Level::L1,
+        }
+    }
+
+    pub fn is_replayable(&self) -> bool {
+        self.guaranteed_level() >= Level::L2
+    }
+}
+
+/// The receipt effect of a program: the weakest guarantee across its stages.
+///
+/// A stream can only be verified as strongly as its least-verifiable stage, so
+/// this is the fold over `guaranteed_level`. The checker rejects a demand above
+/// this, turning an impossible receipt claim into a compile-time error.
+pub fn receipt_effect(program: &QProgram) -> Level {
+    program
+        .stages
+        .iter()
+        .fold(Level::L3, |acc, s| acc.min(s.kernel.guaranteed_level()))
+}
+
+#[cfg(test)]
+mod effect_tests {
+    use super::*;
+
+    #[test]
+    fn builtins_guarantee_l3_custom_guarantees_l1() {
+        assert_eq!(Kernel::Dot.guaranteed_level(), Level::L3);
+        assert_eq!(Kernel::Fwht.guaranteed_level(), Level::L3);
+        assert_eq!(Kernel::Gate.guaranteed_level(), Level::L3);
+        assert_eq!(
+            Kernel::Custom("mystery".into()).guaranteed_level(),
+            Level::L1
+        );
+        assert!(Kernel::Dot.is_replayable());
+        assert!(!Kernel::Custom("mystery".into()).is_replayable());
+    }
+
+    #[test]
+    fn effect_is_the_weakest_stage() {
+        let mut p = QProgram {
+            name: "p".into(),
+            param: "x".into(),
+            param_ty: TensorType::new(DType::I64, vec![8]),
+            output_ty: TensorType::new(DType::I64, vec![8]),
+            stages: vec![
+                Stage {
+                    name: "a".into(),
+                    kernel: Kernel::Dot,
+                    inputs: vec!["x".into()],
+                    weight: 1,
+                },
+                Stage {
+                    name: "b".into(),
+                    kernel: Kernel::Custom("mystery".into()),
+                    inputs: vec!["a".into()],
+                    weight: 2,
+                },
+            ],
+            emit: "b".into(),
+            demand: Level::L1,
+            config: ProgramConfig::default(),
+        };
+        assert_eq!(receipt_effect(&p), Level::L1);
+        p.stages[1].kernel = Kernel::Gate;
+        assert_eq!(receipt_effect(&p), Level::L3);
+    }
+}
