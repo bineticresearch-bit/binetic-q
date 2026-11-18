@@ -16,7 +16,8 @@
 //! ```
 //! Pipeline sugar: `h |> dot(5)` desugars to `dot(h, 5)` (piped value first).
 
-use crate::ir::{DType, Kernel, Level, ProgramConfig, QProgram, Stage, TensorType};
+use crate::cursor::TokenCursor;
+use crate::ir::{Kernel, Level, ProgramConfig, QProgram, Stage};
 use crate::lexer::{LexError, Token};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,14 +49,22 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+fn unexpected(expected: &str, found: &str) -> ParseError {
+    ParseError::Unexpected {
+        expected: expected.to_string(),
+        found: found.to_string(),
+    }
+}
+
 pub struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
+    c: TokenCursor<ParseError>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            c: TokenCursor::new(tokens, unexpected),
+        }
     }
 
     pub fn parse(src: &str) -> Result<QProgram, ParseError> {
@@ -64,66 +73,15 @@ impl Parser {
         p.program()
     }
 
-    fn cur(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
-    }
-
-    fn bump(&mut self) -> Token {
-        let t = self.cur().clone();
-        self.pos += 1;
-        t
-    }
-
-    fn expect(&mut self, want: Token, label: &str) -> Result<(), ParseError> {
-        let got = self.bump();
-        if got == want {
-            Ok(())
-        } else {
-            Err(ParseError::Unexpected {
-                expected: label.to_string(),
-                found: format!("{got:?}"),
-            })
-        }
-    }
-
-    fn ident(&mut self) -> Result<String, ParseError> {
-        match self.bump() {
-            Token::Ident(s) => Ok(s),
-            other => Err(ParseError::Unexpected {
-                expected: "identifier".to_string(),
-                found: format!("{other:?}"),
-            }),
-        }
-    }
-
-    fn uint(&mut self) -> Result<u64, ParseError> {
-        match self.bump() {
-            Token::Int(n) if n >= 0 => Ok(n as u64),
-            other => Err(ParseError::Unexpected {
-                expected: "non-negative integer".to_string(),
-                found: format!("{other:?}"),
-            }),
-        }
-    }
-
-    fn ty(&mut self) -> Result<TensorType, ParseError> {
-        let name = self.ident()?;
-        let dtype = DType::parse(&name).ok_or_else(|| ParseError::BadType(name.clone()))?;
-        self.expect(Token::LBracket, "'['")?;
-        let n = self.uint()? as usize;
-        self.expect(Token::RBracket, "']'")?;
-        Ok(TensorType::new(dtype, vec![n]))
-    }
-
     fn config(&mut self) -> Result<ProgramConfig, ParseError> {
-        self.expect(Token::Ident("config".to_string()), "'config'")?;
-        self.expect(Token::LBrace, "'{'")?;
+        self.c.expect(Token::Ident("config".to_string()), "'config'")?;
+        self.c.expect(Token::LBrace, "'{'")?;
         let mut cfg = ProgramConfig::default();
-        while matches!(self.cur(), Token::Ident(_)) {
-            let key = self.ident()?;
-            self.expect(Token::Eq, "'='")?;
-            let val = self.uint()?;
-            self.expect(Token::Semi, "';'")?;
+        while matches!(self.c.cur(), Token::Ident(_)) {
+            let key = self.c.ident("config field")?;
+            self.c.expect(Token::Eq, "'='")?;
+            let val = self.c.uint("integer value")?;
+            self.c.expect(Token::Semi, "';'")?;
             match key.as_str() {
                 "model_id" => cfg.model_id = val as u32,
                 "lane_width" => cfg.lane_width = val as u16,
@@ -138,12 +96,12 @@ impl Parser {
                 }
             }
         }
-        self.expect(Token::RBrace, "'}'")?;
+        self.c.expect(Token::RBrace, "'}'")?;
         Ok(cfg)
     }
 
     fn arg(&mut self) -> Result<(Option<String>, i64), ParseError> {
-        match self.bump() {
+        match self.c.bump() {
             Token::Ident(s) => Ok((Some(s), 0)),
             Token::Int(n) => Ok((None, n)),
             other => Err(ParseError::Unexpected {
@@ -155,35 +113,35 @@ impl Parser {
 
     /// Returns (kernel, named inputs, weight scalar).
     fn call(&mut self) -> Result<(Kernel, Vec<String>, i64), ParseError> {
-        let name = self.ident()?;
+        let name = self.c.ident("kernel name")?;
         let kernel = Kernel::parse(&name);
-        self.expect(Token::LParen, "'('")?;
+        self.c.expect(Token::LParen, "'('")?;
         let mut inputs = Vec::new();
         let mut weight = 0i64;
-        if *self.cur() != Token::RParen {
+        if *self.c.cur() != Token::RParen {
             loop {
                 let (ident, num) = self.arg()?;
                 match ident {
                     Some(s) => inputs.push(s),
                     None => weight = num,
                 }
-                if *self.cur() == Token::Comma {
-                    self.bump();
+                if *self.c.cur() == Token::Comma {
+                    self.c.bump();
                     continue;
                 }
                 break;
             }
         }
-        self.expect(Token::RParen, "')'")?;
+        self.c.expect(Token::RParen, "')'")?;
         Ok((kernel, inputs, weight))
     }
 
     fn expr(&mut self) -> Result<(Kernel, Vec<String>, i64), ParseError> {
         // Either a direct call, or `IDENT |> call` (piped value becomes first input).
-        if let Token::Ident(name) = self.cur().clone() {
-            if self.tokens.get(self.pos + 1) == Some(&Token::Pipe) {
-                self.bump(); // piped ident
-                self.bump(); // '|>'
+        if let Token::Ident(name) = self.c.cur().clone() {
+            if self.c.tokens.get(self.c.pos + 1) == Some(&Token::Pipe) {
+                self.c.bump(); // piped ident
+                self.c.bump(); // '|>'
                 let (kernel, mut inputs, weight) = self.call()?;
                 inputs.insert(0, name);
                 return Ok((kernel, inputs, weight));
@@ -193,36 +151,37 @@ impl Parser {
     }
 
     fn program(&mut self) -> Result<QProgram, ParseError> {
-        self.expect(Token::At, "'@'")?;
-        let receipt_kw = self.ident()?;
+        self.c.expect(Token::At, "'@'")?;
+        let receipt_kw = self.c.ident("'receipt'")?;
         if receipt_kw != "receipt" {
             return Err(ParseError::Unexpected {
                 expected: "'receipt'".to_string(),
                 found: receipt_kw,
             });
         }
-        let level_name = self.ident()?;
-        let demand = Level::parse(&level_name).ok_or_else(|| ParseError::BadReceipt(level_name))?;
+        let level_name = self.c.ident("receipt level")?;
+        let demand =
+            Level::parse(&level_name).ok_or_else(|| ParseError::BadReceipt(level_name))?;
 
-        self.expect(Token::Ident("qblock".to_string()), "'qblock'")?;
-        let name = self.ident()?;
-        self.expect(Token::LParen, "'('")?;
-        let param = self.ident()?;
-        self.expect(Token::Colon, "':'")?;
-        let param_ty = self.ty()?;
-        self.expect(Token::RParen, "')'")?;
-        self.expect(Token::Arrow, "'->'")?;
-        let output_ty = self.ty()?;
-        self.expect(Token::LBrace, "'{'")?;
+        self.c.expect(Token::Ident("qblock".to_string()), "'qblock'")?;
+        let name = self.c.ident("block name")?;
+        self.c.expect(Token::LParen, "'('")?;
+        let param = self.c.ident("parameter name")?;
+        self.c.expect(Token::Colon, "':'")?;
+        let param_ty = self.c.ty(ParseError::BadType)?;
+        self.c.expect(Token::RParen, "')'")?;
+        self.c.expect(Token::Arrow, "'->'")?;
+        let output_ty = self.c.ty(ParseError::BadType)?;
+        self.c.expect(Token::LBrace, "'{'")?;
 
         let config = self.config()?;
         let mut stages = Vec::new();
-        while *self.cur() == Token::Ident("let".to_string()) {
-            self.bump(); // 'let'
-            let sname = self.ident()?;
-            self.expect(Token::Eq, "'='")?;
+        while *self.c.cur() == Token::Ident("let".to_string()) {
+            self.c.bump(); // 'let'
+            let sname = self.c.ident("stage name")?;
+            self.c.expect(Token::Eq, "'='")?;
             let (kernel, inputs, weight) = self.expr()?;
-            self.expect(Token::Semi, "';'")?;
+            self.c.expect(Token::Semi, "';'")?;
             stages.push(Stage {
                 name: sname,
                 kernel,
@@ -230,11 +189,11 @@ impl Parser {
                 weight,
             });
         }
-        self.expect(Token::Ident("emit".to_string()), "'emit'")?;
-        let emit = self.ident()?;
-        self.expect(Token::Semi, "';'")?;
-        self.expect(Token::RBrace, "'}'")?;
-        self.expect(Token::Eof, "end of file")?;
+        self.c.expect(Token::Ident("emit".to_string()), "'emit'")?;
+        let emit = self.c.ident("emit name")?;
+        self.c.expect(Token::Semi, "';'")?;
+        self.c.expect(Token::RBrace, "'}'")?;
+        self.c.expect(Token::Eof, "end of file")?;
 
         Ok(QProgram {
             name,

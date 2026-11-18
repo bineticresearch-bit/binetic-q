@@ -24,6 +24,7 @@
 //! - [`evolve`] — Q4: the program graph itself is the search space.
 
 pub mod check;
+pub mod cursor;
 pub mod evolve;
 pub mod fitness;
 pub mod ir;

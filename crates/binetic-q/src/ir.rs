@@ -150,6 +150,21 @@ impl Kernel {
             other => Kernel::Custom(other.to_string()),
         }
     }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Kernel::Dot => "dot",
+            Kernel::Fwht => "fwht",
+            Kernel::Gate => "gate",
+            Kernel::Custom(s) => s.as_str(),
+        }
+    }
+}
+
+impl fmt::Display for Kernel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 /// A reference to a port: `(block index, port index)`.

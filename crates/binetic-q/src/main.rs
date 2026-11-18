@@ -288,15 +288,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn kernel_name(k: &binetic_q::Kernel) -> String {
-    match k {
-        binetic_q::Kernel::Dot => "dot".into(),
-        binetic_q::Kernel::Fwht => "fwht".into(),
-        binetic_q::Kernel::Gate => "gate".into(),
-        binetic_q::Kernel::Custom(s) => s.clone(),
-    }
-}
-
 fn read_source(path: &PathBuf) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))
 }
@@ -492,7 +483,7 @@ fn real_main() -> Result<(), String> {
                     intent: intent.name,
                     demand: intent.demand.as_str().to_string(),
                     stages: r.best.kernels.len(),
-                    kernels: r.best.kernels.iter().map(kernel_name).collect(),
+                    kernels: r.best.kernels.iter().map(|k| k.to_string()).collect(),
                     baseline_score: r.baseline_fitness.score,
                     best_score: r.best_fitness.score,
                     improved: r.improved(),

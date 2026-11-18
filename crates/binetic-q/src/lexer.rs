@@ -1,8 +1,6 @@
 //! Hand-rolled lexer for `.q` source. No regex dependency; every byte is
 //! classified explicitly so the grammar stays auditable.
 
-use crate::ir::{DType, Level};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     Ident(String),
@@ -27,8 +25,6 @@ pub enum Token {
 pub enum LexError {
     UnexpectedChar { ch: char, pos: usize },
     BadInteger { text: String, pos: usize },
-    UnknownReceipt { text: String, pos: usize },
-    UnknownType { text: String, pos: usize },
 }
 
 impl std::fmt::Display for LexError {
@@ -38,10 +34,6 @@ impl std::fmt::Display for LexError {
                 write!(f, "unexpected char {ch:?} at byte {pos}")
             }
             LexError::BadInteger { text, pos } => write!(f, "bad integer {text:?} at byte {pos}"),
-            LexError::UnknownReceipt { text, pos } => {
-                write!(f, "unknown receipt level {text:?} at byte {pos}")
-            }
-            LexError::UnknownType { text, pos } => write!(f, "unknown type {text:?} at byte {pos}"),
         }
     }
 }
@@ -103,17 +95,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        let text = &self.src[start..self.pos];
-        match text {
-            "qblock" | "config" | "emit" | "let" | "receipt" => Token::Ident(text.to_string()),
-            "i64" | "f32" => {
-                if DType::parse(text).is_none() {
-                    // unreachable in practice; kept explicit for clarity
-                }
-                Token::Ident(text.to_string())
-            }
-            _ => Token::Ident(text.to_string()),
-        }
+        Token::Ident(self.src[start..self.pos].to_string())
     }
 
     pub fn tokenize(mut self) -> Result<Vec<Token>, LexError> {
@@ -160,21 +142,7 @@ impl<'a> Lexer<'a> {
                     out.push(Token::Int(v));
                 }
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                    let tok = self.ident(start);
-                    if let Token::Ident(ref s) = tok {
-                        if s == "receipt" || s == "L0" || s == "L1" || s == "L2" || s == "L3" {
-                            // levels are parsed in the parser via Level::parse
-                        }
-                        if Level::parse(s).is_none()
-                            && matches!(s.as_str(), "L0" | "L1" | "L2" | "L3")
-                        {
-                            return Err(LexError::UnknownReceipt {
-                                text: s.clone(),
-                                pos: start,
-                            });
-                        }
-                    }
-                    out.push(tok);
+                    out.push(self.ident(start));
                 }
                 other => {
                     return Err(LexError::UnexpectedChar {

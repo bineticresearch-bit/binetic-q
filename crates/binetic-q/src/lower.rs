@@ -260,12 +260,7 @@ pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResu
         };
         stage_receipts.push(StageReceipt {
             name: stage.name.clone(),
-            kernel: match &stage.kernel {
-                crate::ir::Kernel::Dot => "dot".into(),
-                crate::ir::Kernel::Fwht => "fwht".into(),
-                crate::ir::Kernel::Gate => "gate".into(),
-                crate::ir::Kernel::Custom(s) => s.clone(),
-            },
+            kernel: stage.kernel.to_string(),
             replayed,
         });
         input = output.clone();

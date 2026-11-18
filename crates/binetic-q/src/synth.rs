@@ -20,7 +20,8 @@
 //! }
 //! ```
 
-use crate::ir::{receipt_effect, DType, Kernel, Level, ProgramConfig, QProgram, Stage, TensorType};
+use crate::cursor::TokenCursor;
+use crate::ir::{receipt_effect, Kernel, Level, ProgramConfig, QProgram, Stage, TensorType};
 use crate::lexer::{LexError, Token};
 use crate::{check, default_throughput, optimize, run, OptimizeConfig};
 
@@ -78,77 +79,14 @@ impl std::fmt::Display for SynthError {
 
 impl std::error::Error for SynthError {}
 
-struct Cursor {
-    tokens: Vec<Token>,
-    pos: usize,
-}
-
-impl Cursor {
-    fn new(src: &str) -> Result<Self, SynthError> {
-        Ok(Self {
-            tokens: crate::lexer::Lexer::new(src).tokenize()?,
-            pos: 0,
-        })
-    }
-
-    fn cur(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
-    }
-
-    fn bump(&mut self) -> Token {
-        let t = self.cur().clone();
-        self.pos += 1;
-        t
-    }
-
-    fn ident(&mut self, what: &str) -> Result<String, SynthError> {
-        match self.bump() {
-            Token::Ident(s) => Ok(s),
-            other => Err(SynthError::Syntax(format!(
-                "expected {what}, found {other:?}"
-            ))),
-        }
-    }
-
-    fn uint(&mut self, what: &str) -> Result<u64, SynthError> {
-        match self.bump() {
-            Token::Int(n) if n >= 0 => Ok(n as u64),
-            other => Err(SynthError::Syntax(format!(
-                "expected {what}, found {other:?}"
-            ))),
-        }
-    }
-
-    fn expect(&mut self, want: Token, label: &str) -> Result<(), SynthError> {
-        let got = self.bump();
-        if got == want {
-            Ok(())
-        } else {
-            Err(SynthError::Syntax(format!(
-                "expected {label}, found {got:?}"
-            )))
-        }
-    }
-
-    fn eat_semi(&mut self) -> Result<(), SynthError> {
-        self.expect(Token::Semi, "';'")
-    }
-
-    fn ty(&mut self) -> Result<TensorType, SynthError> {
-        let name = self.ident("dtype")?;
-        let dtype = DType::parse(&name)
-            .ok_or_else(|| SynthError::Syntax(format!("unknown dtype {name:?}")))?;
-        self.expect(Token::LBracket, "'['")?;
-        let n = self.uint("tensor length")? as usize;
-        self.expect(Token::RBracket, "']'")?;
-        self.eat_semi()?;
-        Ok(TensorType::new(dtype, vec![n]))
-    }
+fn synth_err(expected: &str, found: &str) -> SynthError {
+    SynthError::Syntax(format!("expected {expected}, found {found}"))
 }
 
 /// Parse a declarative intent source into an [`Intent`].
 pub fn parse_intent(src: &str) -> Result<Intent, SynthError> {
-    let mut c = Cursor::new(src)?;
+    let tokens = crate::lexer::Lexer::new(src).tokenize()?;
+    let mut c: TokenCursor<SynthError> = TokenCursor::new(tokens, synth_err);
     c.expect(Token::Ident("intent".into()), "'intent'")?;
     let name = c.ident("intent name")?;
     c.expect(Token::LBrace, "'{'")?;
@@ -160,16 +98,25 @@ pub fn parse_intent(src: &str) -> Result<Intent, SynthError> {
     let mut weights: Option<Vec<i64>> = None;
     let mut geometry = Geometry::Fixed;
 
+    // `ty_semi` parses a tensor type followed by its trailing semicolon.
+    macro_rules! ty_semi {
+        ($c:expr) => {{
+            let t = $c.ty(|n| SynthError::Syntax(format!("unknown dtype {n:?}")))?;
+            $c.expect(Token::Semi, "';'")?;
+            t
+        }};
+    }
+
     while *c.cur() != Token::RBrace {
         let field = c.ident("field name")?;
         match field.as_str() {
-            "input" => input = Some(c.ty()?),
-            "output" => output = Some(c.ty()?),
+            "input" => input = Some(ty_semi!(c)),
+            "output" => output = Some(ty_semi!(c)),
             "demand" => {
                 let lvl = c.ident("receipt level")?;
                 demand = Level::parse(&lvl)
                     .ok_or_else(|| SynthError::Syntax(format!("unknown level {lvl:?}")))?;
-                c.eat_semi()?;
+                c.expect(Token::Semi, "';'")?;
             }
             "pipeline" => {
                 c.expect(Token::LBracket, "'['")?;
@@ -185,7 +132,7 @@ pub fn parse_intent(src: &str) -> Result<Intent, SynthError> {
                     }
                 }
                 c.expect(Token::RBracket, "']'")?;
-                c.eat_semi()?;
+                c.expect(Token::Semi, "';'")?;
             }
             "weights" => {
                 c.expect(Token::LBracket, "'['")?;
@@ -201,7 +148,7 @@ pub fn parse_intent(src: &str) -> Result<Intent, SynthError> {
                     }
                 }
                 c.expect(Token::RBracket, "']'")?;
-                c.eat_semi()?;
+                c.expect(Token::Semi, "';'")?;
                 weights = Some(ws);
             }
             "geometry" => {
@@ -211,7 +158,7 @@ pub fn parse_intent(src: &str) -> Result<Intent, SynthError> {
                     "optimize" => Geometry::Optimize,
                     other => return Err(SynthError::Syntax(format!("unknown geometry {other:?}"))),
                 };
-                c.eat_semi()?;
+                c.expect(Token::Semi, "';'")?;
             }
             other => {
                 return Err(SynthError::Syntax(format!("unknown field {other:?}")));
@@ -374,15 +321,6 @@ pub fn synthesize(src: &str) -> Result<Synthesis, SynthError> {
     })
 }
 
-fn kernel_str(k: &Kernel) -> String {
-    match k {
-        Kernel::Dot => "dot".into(),
-        Kernel::Fwht => "fwht".into(),
-        Kernel::Gate => "gate".into(),
-        Kernel::Custom(s) => s.clone(),
-    }
-}
-
 /// Render a `QProgram` back to canonical `.q` source. The output re-parses to
 /// an equivalent program (see tests/q3.rs round-trip). All stage inputs are
 /// rendered, so multi-input stages survive the round trip.
@@ -409,7 +347,7 @@ pub fn render_q(p: &QProgram) -> String {
         let inputs = stage.inputs.join(", ");
         s.push_str(&format!(
             "  let {} = {}({}, {});\n",
-            stage.name, kernel_str(&stage.kernel), inputs, stage.weight
+            stage.name, stage.kernel, inputs, stage.weight
         ));
     }
     s.push_str(&format!("  emit {};\n", p.emit));

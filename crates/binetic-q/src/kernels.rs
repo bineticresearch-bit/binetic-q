@@ -112,7 +112,7 @@ impl KernelRegistry {
     }
 
     pub fn spec(&self, kernel: &Kernel) -> Option<&KernelSpec> {
-        self.specs.get(&kernel_name(kernel))
+        self.specs.get(kernel_name(kernel))
     }
 
     /// Earned guarantee for a kernel: L3 if registered with a replay oracle,
@@ -139,13 +139,8 @@ impl Default for KernelRegistry {
     }
 }
 
-fn kernel_name(k: &Kernel) -> String {
-    match k {
-        Kernel::Dot => "dot".into(),
-        Kernel::Fwht => "fwht".into(),
-        Kernel::Gate => "gate".into(),
-        Kernel::Custom(s) => s.clone(),
-    }
+fn kernel_name(k: &Kernel) -> &str {
+    k.as_str()
 }
 
 /// The receipt effect of a program under a registry: the weakest *earned*
