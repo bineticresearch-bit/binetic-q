@@ -12,19 +12,17 @@
 //! ```text
 //! intent <name> {
 //!   input <dtype>[<n>];
-//!   output <dtype>[<n>];
-//!   demand L<k>;
+//!   output <dtype>[<n>];                // optional, defaults to input
+//!   demand L<k>;                        // optional, default L3
 //!   pipeline [ <kernel>, <kernel>, ... ];
-//!   weights [ <int>, <int>, ... ];        // optional
-//!   geometry fixed | optimize;            // optional, default fixed
+//!   weights [ <int>, <int>, ... ];      // optional
+//!   geometry fixed | optimize;          // optional, default fixed
 //! }
 //! ```
 
-use binetic_evolver::LaneScaledThroughput;
-
 use crate::ir::{receipt_effect, DType, Kernel, Level, ProgramConfig, QProgram, Stage, TensorType};
 use crate::lexer::{LexError, Token};
-use crate::{check, optimize, run, OptimizeConfig};
+use crate::{check, default_throughput, optimize, run, OptimizeConfig};
 
 /// How execution geometry is chosen during synthesis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,22 +253,28 @@ pub fn parse_intent(src: &str) -> Result<Intent, SynthError> {
     })
 }
 
-fn default_weight(seed: u64, idx: usize) -> i64 {
+/// Fixed seed for derived weights. Default weights must be a pure function
+/// of the intent alone — never of `config.seed` — so the probe program and
+/// the final program agree even when a geometry search changes the seed.
+const DEFAULT_WEIGHT_SEED: u64 = 0;
+
+fn default_weight(idx: usize) -> i64 {
     // Non-negative (the Q lexer has no negative integer literal) and deterministic.
-    (seed.wrapping_add(idx as u64 * 0x9E37_79B9) % 997) as i64
+    (DEFAULT_WEIGHT_SEED.wrapping_add(idx as u64 * 0x9E37_79B9) % 997) as i64
 }
 
 /// Expand an intent into a `QProgram` with the given geometry.
 pub fn build_program(intent: &Intent, config: ProgramConfig) -> QProgram {
+    let param = "x".to_string();
     let mut stages = Vec::new();
-    let mut prev = intent_name(&intent.input);
+    let mut prev = param.clone();
     for (i, kernel) in intent.kernels.iter().enumerate() {
         let name = format!("s{i}");
         let weight = intent
             .weights
             .as_ref()
             .map(|w| w[i])
-            .unwrap_or_else(|| default_weight(config.seed, i));
+            .unwrap_or_else(|| default_weight(i));
         stages.push(Stage {
             name: name.clone(),
             kernel: kernel.clone(),
@@ -281,7 +285,7 @@ pub fn build_program(intent: &Intent, config: ProgramConfig) -> QProgram {
     }
     QProgram {
         name: intent.name.clone(),
-        param: "x".into(),
+        param,
         param_ty: intent.input.clone(),
         output_ty: intent.output.clone(),
         stages,
@@ -291,15 +295,12 @@ pub fn build_program(intent: &Intent, config: ProgramConfig) -> QProgram {
     }
 }
 
-fn intent_name(_: &TensorType) -> String {
-    "x".into()
-}
-
 /// The deterministic result of synthesis: a verified program plus its source
 /// and receipts. Synthesize never returns a program that fails verification.
 #[derive(Debug, Clone)]
 pub struct Synthesis {
-    pub intent: String,
+    /// Name of the intent that was synthesized.
+    pub intent_name: String,
     pub source: String,
     pub program: QProgram,
     pub geometry: Geometry,
@@ -308,13 +309,6 @@ pub struct Synthesis {
     pub receipt_bytes: u64,
     pub packet_count: usize,
     pub verified: [bool; 4],
-}
-
-fn default_throughput() -> LaneScaledThroughput {
-    LaneScaledThroughput {
-        base_tokens_per_second: 30.0,
-        reference_lane_width: 8,
-    }
 }
 
 /// Synthesize a verified `.q` program from intent source.
@@ -329,12 +323,7 @@ pub fn synthesize(src: &str) -> Result<Synthesis, SynthError> {
 
     let geometry = intent.geometry;
     if geometry == Geometry::Optimize {
-        let cfg = OptimizeConfig {
-            generations: 8,
-            population: 8,
-            seed: 5150,
-            ..OptimizeConfig::default()
-        };
+        let cfg = OptimizeConfig::default();
         let result = optimize(&probe, default_throughput(), cfg);
         config.lane_width = result.best_genome.lane_width;
         config.tile_size = result.best_genome.tile_size;
@@ -373,7 +362,7 @@ pub fn synthesize(src: &str) -> Result<Synthesis, SynthError> {
     }
 
     Ok(Synthesis {
-        intent: intent.name.clone(),
+        intent_name: intent.name.clone(),
         source: render_q(&program),
         program,
         geometry,
@@ -383,13 +372,6 @@ pub fn synthesize(src: &str) -> Result<Synthesis, SynthError> {
         packet_count: r.packet_count,
         verified,
     })
-}
-
-fn dtype_str(d: DType) -> &'static str {
-    match d {
-        DType::I64 => "i64",
-        DType::F32 => "f32",
-    }
 }
 
 fn kernel_str(k: &Kernel) -> String {
@@ -402,7 +384,8 @@ fn kernel_str(k: &Kernel) -> String {
 }
 
 /// Render a `QProgram` back to canonical `.q` source. The output re-parses to
-/// an equivalent program (see tests/q3.rs round-trip).
+/// an equivalent program (see tests/q3.rs round-trip). All stage inputs are
+/// rendered, so multi-input stages survive the round trip.
 pub fn render_q(p: &QProgram) -> String {
     let mut s = String::new();
     s.push_str(&format!("@receipt {}\n", p.demand));
@@ -410,9 +393,9 @@ pub fn render_q(p: &QProgram) -> String {
         "qblock {}({}: {}[{}]) -> {}[{}] {{\n",
         p.name,
         p.param,
-        dtype_str(p.param_ty.dtype),
+        p.param_ty.dtype,
         p.param_ty.len(),
-        dtype_str(p.output_ty.dtype),
+        p.output_ty.dtype,
         p.output_ty.len()
     ));
     s.push_str("  config {\n");
@@ -423,17 +406,10 @@ pub fn render_q(p: &QProgram) -> String {
     s.push_str(&format!("    seed = {};\n", p.config.seed));
     s.push_str("  }\n");
     for stage in &p.stages {
-        let input = stage
-            .inputs
-            .first()
-            .cloned()
-            .unwrap_or_else(|| p.param.clone());
+        let inputs = stage.inputs.join(", ");
         s.push_str(&format!(
             "  let {} = {}({}, {});\n",
-            stage.name,
-            kernel_str(&stage.kernel),
-            input,
-            stage.weight
+            stage.name, kernel_str(&stage.kernel), inputs, stage.weight
         ));
     }
     s.push_str(&format!("  emit {};\n", p.emit));
@@ -489,9 +465,9 @@ intent pipeline {
 
     #[test]
     fn refuses_impossible_effect() {
-        let bad = INTENT
-            .replace("demand L3;", "demand L3;")
-            .replace("gate];", "mystery];");
+        // `mystery` is a Custom kernel (guarantees L1); demanding L3 must be
+        // refused before any execution.
+        let bad = INTENT.replace("gate];", "mystery];");
         let err = synthesize(&bad).unwrap_err();
         match err {
             SynthError::Check(_) | SynthError::Unverifiable(_) => {}

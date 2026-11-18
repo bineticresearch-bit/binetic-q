@@ -9,11 +9,23 @@
 //! step in Q.
 
 use binetic_evolver::{
-    Evolver, Fitness, FitnessFn, Genome, ThroughputModel, INVALID_GENOME_RECEIPT_BYTES,
+    Evolver, Fitness, FitnessFn, Genome, LaneScaledThroughput, ThroughputModel,
+    INVALID_GENOME_RECEIPT_BYTES,
 };
 
 use crate::ir::{Level, QProgram};
 use crate::{check, run, RunResult};
+
+/// The default pure throughput model: 30 tokens/s at a reference 8-lane
+/// width. Shared by the CLI and Q3/Q4 synthesis so every caller searches one
+/// deterministic landscape instead of per-caller magic numbers. Callers can
+/// still pass any `ThroughputModel` (fixed rate, measured lookup, ...).
+pub fn default_throughput() -> LaneScaledThroughput {
+    LaneScaledThroughput {
+        base_tokens_per_second: 30.0,
+        reference_lane_width: 8,
+    }
+}
 
 fn invalid() -> Fitness {
     Fitness::from_measurements(0.0, 0.0, INVALID_GENOME_RECEIPT_BYTES)
@@ -214,10 +226,7 @@ qblock pipeline(x: i64[8]) -> i64[8] {
 "#;
 
     fn model() -> LaneScaledThroughput {
-        LaneScaledThroughput {
-            base_tokens_per_second: 30.0,
-            reference_lane_width: 8,
-        }
+        default_throughput()
     }
 
     #[test]

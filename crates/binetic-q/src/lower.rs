@@ -8,11 +8,12 @@
 
 use binetic_core::{hash_bytes, FabricPacket};
 use binetic_fabric::{
-    build_plan, compute_plan_hash, DotProductKernel, Fabric, PlanConfig, VPortKind,
+    build_plan, compute_plan_hash, ComputeKernel, DotProductKernel, Fabric, PlanConfig, VPortKind,
 };
 use binetic_verify::{ReceiptTree, VerificationReport};
 
-use crate::ir::{receipt_effect, Level, QProgram, Stage};
+use crate::ir::{DType, Level, QProgram, Stage};
+use crate::kernels::{receipt_effect_with, FabricKernel, KernelRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
@@ -36,6 +37,9 @@ pub enum RunError {
     Compile(CompileError),
     Fabric(String),
     NoPorts,
+    /// A registered stage's replay oracle re-derived a different output than
+    /// the fabric committed. The run is refused: receipts must hold.
+    ReplayFailed(String),
 }
 
 impl From<CompileError> for RunError {
@@ -50,35 +54,56 @@ impl std::fmt::Display for RunError {
             RunError::Compile(e) => write!(f, "{e}"),
             RunError::Fabric(s) => write!(f, "fabric execute error: {s}"),
             RunError::NoPorts => write!(f, "fabric has no executable port"),
+            RunError::ReplayFailed(stage) => {
+                write!(f, "semantic replay failed at stage {stage:?}")
+            }
         }
     }
 }
 
 impl std::error::Error for RunError {}
 
+/// Per-stage replay evidence for one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageReceipt {
+    pub name: String,
+    pub kernel: String,
+    /// True when the stage's registered replay oracle re-derived the
+    /// committed output. False for stages without a registered oracle
+    /// (L1 kernels) — they claim no replay.
+    pub replayed: bool,
+}
+
 /// Result of a compiled-and-run Q program, with all recorded evidence.
 #[derive(Debug, Clone)]
 pub struct RunResult {
     pub plan_hash: [u8; 32],
+    /// Final output lanes. i64 programs hold integer values; f32 programs
+    /// hold IEEE-754 bit patterns in the low 32 bits of each lane; u64 holds
+    /// 64-bit patterns; u128/u256 hold little-endian 64-bit words (2/4 per
+    /// value).
     pub output: Vec<i64>,
     pub packet_count: usize,
     /// Sum of serialized receipt bytes, for verified-throughput fitness.
     pub receipt_bytes: u64,
     pub chain_root: [u8; 32],
     pub report: VerificationReport,
+    /// Per-stage replay evidence, in pipeline order.
+    pub stages: Vec<StageReceipt>,
 }
 
-/// Build the deterministic `PlanConfig` from a checked program.
+/// Build the deterministic `PlanConfig` from a checked program. The fabric
+/// sees *lanes*, not elements: wide dtypes (u128/u256) occupy multiple
+/// 64-bit lanes per value, so the plan's input/output lengths are lane
+/// counts.
 pub fn plan_config(program: &QProgram) -> PlanConfig {
-    let out_len = program.output_ty.len() as u32;
-    let in_len = program.param_ty.len() as u32;
     PlanConfig {
         model_id: program.config.model_id,
         layer_id: 0,
         block_id: 0,
         op_code: 1,
-        output_len: out_len,
-        input_len: in_len,
+        output_len: program.output_ty.lane_len() as u32,
+        input_len: program.param_ty.lane_len() as u32,
         lane_width: program.config.lane_width,
         tile_size: program.config.tile_size,
         node_count: program.config.node_count,
@@ -98,19 +123,43 @@ pub fn compile(program: &QProgram) -> Result<([u8; 32], PlanConfig), CompileErro
 }
 
 /// Deterministic initial input from the program seed (no I/O, no clock).
+/// Produces `lane_len` lanes: f32 lanes carry IEEE-754 bit patterns; wide
+/// unsigned values are built word-by-word (little-endian) from consecutive
+/// counters of the same deterministic stream.
 fn initial_input(program: &QProgram) -> Vec<i64> {
-    let n = program.param_ty.len();
-    (0..n)
+    let lanes = program.param_ty.lane_len();
+    let dtype = program.param_ty.dtype;
+    (0..lanes)
         .map(|i| {
-            ((program.config.seed.wrapping_add(i as u64 * 2_654_435_761)) % 2001) as i64 - 1000
+            let raw = (program
+                .config
+                .seed
+                .wrapping_add(i as u64 * 2_654_435_761))
+                % 2001;
+            lane_value(dtype, raw)
         })
         .collect()
 }
 
-/// Deterministic weight matrix for a stage: `input_len` rows × `input_len`
-/// cols. Different kernels and scalars yield different matrices, but all are
-/// pure functions of (seed, kernel name, weight scalar).
+/// Map a deterministic raw counter to one lane value for the port dtype.
+fn lane_value(dtype: DType, raw: u64) -> i64 {
+    match dtype {
+        DType::I64 => raw as i64 - 1000,
+        DType::F32 => ((raw as f32 / 2001.0) - 1.0).to_bits() as i64,
+        // Unsigned words: small deterministic residues; wide values are
+        // assembled from consecutive counters, low word first.
+        DType::U64 | DType::U128 | DType::U256 => raw as i64,
+    }
+}
+
+/// Deterministic weight matrix for a stage. `input_len` is the element
+/// count; the fabric sees `lane_len = input_len · words` lanes, and the dot
+/// kernel expects `rows · lane_len` weight lanes with `rows = input_len` —
+/// i.e. `input_len² · words` words total. Different kernels and scalars yield
+/// different matrices, but all are pure functions of (seed, kernel name,
+/// weight scalar).
 fn stage_weight(program: &QProgram, stage: &Stage, input_len: usize) -> Vec<i64> {
+    let words = program.param_ty.dtype.words();
     let kernel_tag = match stage.kernel {
         crate::ir::Kernel::Dot => 1u64,
         crate::ir::Kernel::Fwht => 2u64,
@@ -122,19 +171,22 @@ fn stage_weight(program: &QProgram, stage: &Stage, input_len: usize) -> Vec<i64>
         .seed
         .wrapping_add(kernel_tag.wrapping_mul(0x9e37_79b9_7f4a_7c15))
         .wrapping_add((stage.weight as u64).wrapping_mul(0x85eb_ca6b));
+    let dtype = program.param_ty.dtype;
     let mut x = base;
-    (0..input_len * input_len)
+    (0..input_len * input_len * words)
         .map(|_| {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            (x % 2001) as i64 - 1000
+            lane_value(dtype, x % 2001)
         })
         .collect()
 }
 
-/// Replay oracle: independently re-derive the committed output hash and the
-/// state transition from the carried receipt fields.
+/// Replay oracle for the receipt tree: independently re-derive the committed
+/// output hash and the state transition from the carried receipt fields.
+/// (Per-stage *semantic* replay — re-deriving the output from (input,
+/// weight) — is enforced by `run_with` via the kernel registry.)
 fn replay_oracle(packet: &FabricPacket) -> bool {
     if hash_bytes(&packet.payload) != packet.output_hash {
         return false;
@@ -146,9 +198,21 @@ fn replay_oracle(packet: &FabricPacket) -> bool {
     packet.state_after == hash_bytes(&pre)
 }
 
-/// Compile and execute a checked program on a real fabric.
+/// Compile and execute a checked program on a real fabric, using the default
+/// kernel registry. See [`run_with`] for the registry-aware form.
 pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
-    crate::check(program).map_err(|e| RunError::Fabric(format!("check failed: {e}")))?;
+    run_with(program, &KernelRegistry::default())
+}
+
+/// Compile and execute a checked program on a real fabric under a kernel
+/// registry. Every stage runs through its registered compute (unregistered
+/// Custom kernels use the documented dot-product default), and every stage
+/// with a registered replay oracle is semantically replayed: the committed
+/// output is re-derived independently from (input, weight) and the run is
+/// refused on mismatch.
+pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResult, RunError> {
+    crate::check::check_with(program, registry)
+        .map_err(|e| RunError::Fabric(format!("check failed: {e}")))?;
 
     let cfg = plan_config(program);
     let mut fabric = Fabric::build(&cfg).map_err(|e| RunError::Fabric(format!("{e:?}")))?;
@@ -160,14 +224,50 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
         .ok_or(RunError::NoPorts)?;
 
     let input_len = program.param_ty.len();
+    let dtype = program.param_ty.dtype;
+    let lane_width = program.config.lane_width;
     let mut input = initial_input(program);
     let mut output = input.clone();
+    let mut stage_receipts: Vec<StageReceipt> = Vec::new();
 
     for stage in &program.stages {
         let weight = stage_weight(program, stage, input_len);
+        // Kernel from the registry: real semantics + earned guarantee.
+        // Unregistered Custom kernels fall back to the documented
+        // dot-product compute and claim no replay (L1).
+        let spec = registry.spec(&stage.kernel);
+        let adapter = spec.map(|s| FabricKernel { spec: s, dtype });
+        let kernel: &dyn ComputeKernel = match &adapter {
+            Some(a) => a,
+            None => &DotProductKernel,
+        };
         output = fabric
-            .execute(vport, &input, &weight, &DotProductKernel)
+            .execute(vport, &input, &weight, kernel)
             .map_err(|e| RunError::Fabric(format!("{e:?}")))?;
+
+        // Semantic replay: re-derive the committed output independently.
+        let replayed = match spec {
+            Some(s) => match s.replay.as_deref() {
+                Some(oracle) => {
+                    if !oracle.replay(dtype, lane_width, &input, &weight, &output) {
+                        return Err(RunError::ReplayFailed(stage.name.clone()));
+                    }
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        };
+        stage_receipts.push(StageReceipt {
+            name: stage.name.clone(),
+            kernel: match &stage.kernel {
+                crate::ir::Kernel::Dot => "dot".into(),
+                crate::ir::Kernel::Fwht => "fwht".into(),
+                crate::ir::Kernel::Gate => "gate".into(),
+                crate::ir::Kernel::Custom(s) => s.clone(),
+            },
+            replayed,
+        });
         input = output.clone();
     }
 
@@ -186,10 +286,10 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
         .map(|p| p.to_bytes().map(|b| b.len() as u64).unwrap_or(0))
         .sum::<u64>();
     let chain_root = tree.chain_root();
-    // Only claim replay-backed levels when the program's effect provides them.
-    // A Custom-capped program is verified structurally (L0/L1) and reports
-    // level2/level3 = false, matching what `check` statically guaranteed.
-    let report = if receipt_effect(program) >= Level::L2 {
+    // Only claim replay-backed levels when the program's earned effect
+    // provides them. An L1-capped program is verified structurally and
+    // reports level2/level3 = false, matching what `check` guaranteed.
+    let report = if receipt_effect_with(program, registry) >= Level::L2 {
         tree.verify_with_replay(replay_oracle)
     } else {
         tree.verify()
@@ -202,6 +302,7 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
         receipt_bytes,
         chain_root,
         report,
+        stages: stage_receipts,
     })
 }
 
@@ -248,6 +349,43 @@ qblock pipeline(x: i64[8]) -> i64[8] {
     #[test]
     fn plan_hash_is_deterministic_across_runs() {
         let p = Parser::parse(P).unwrap();
+        let a = run(&p).unwrap();
+        let b = run(&p).unwrap();
+        assert_eq!(a.plan_hash, b.plan_hash);
+        assert_eq!(a.chain_root, b.chain_root);
+        assert_eq!(a.output, b.output);
+    }
+
+    const F: &str = r#"
+@receipt L3
+qblock fp(x: f32[8]) -> f32[8] {
+  config { model_id = 11; lane_width = 32; tile_size = 8; node_count = 2; seed = 7; }
+  let h = dot(x, 3);
+  let y = h |> gate(9);
+  emit y;
+}
+"#;
+
+    #[test]
+    fn f32_program_runs_and_verifies_l0_l3() {
+        let p = Parser::parse(F).unwrap();
+        let r = run(&p).unwrap();
+        assert_eq!(r.packet_count, 2, "one packet per Qblock stage");
+        assert!(r.report.level0);
+        assert!(r.report.level1);
+        assert!(r.report.level2, "replay must hold for the float kernel");
+        assert!(r.report.level3);
+        assert!(r.report.all_valid);
+        // f32 lanes carry bit patterns: every output lane fits in 32 bits.
+        assert!(r
+            .output
+            .iter()
+            .all(|v| *v >= 0 && *v < (1i64 << 32)));
+    }
+
+    #[test]
+    fn f32_run_is_deterministic() {
+        let p = Parser::parse(F).unwrap();
         let a = run(&p).unwrap();
         let b = run(&p).unwrap();
         assert_eq!(a.plan_hash, b.plan_hash);

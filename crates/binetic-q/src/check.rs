@@ -5,7 +5,8 @@
 //! stage cannot guarantee it. A receipt claim is a compile-time type effect,
 //! not a runtime surprise.
 
-use crate::ir::{receipt_effect, DType, Level, ProgramConfig, QProgram};
+use crate::ir::{Level, ProgramConfig, QProgram};
+use crate::kernels::{receipt_effect_with, KernelRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckError {
@@ -14,7 +15,10 @@ pub enum CheckError {
         param: usize,
         output: usize,
     },
-    UnsupportedDtype(String),
+    DtypeMismatch {
+        param: String,
+        output: String,
+    },
     UnsupportedLaneWidth(u16),
     BadGeometry(String),
     UnknownName(String),
@@ -35,8 +39,16 @@ impl std::fmt::Display for CheckError {
             CheckError::ShapeMismatch { param, output } => {
                 write!(f, "input length {param} != output length {output}")
             }
-            CheckError::UnsupportedDtype(d) => write!(f, "unsupported dtype {d:?}"),
-            CheckError::UnsupportedLaneWidth(w) => write!(f, "unsupported lane width {w}"),
+            CheckError::DtypeMismatch { param, output } => {
+                write!(
+                    f,
+                    "dtype mismatch: param is {param} but output is {output}; pipelines are dtype-homogeneous"
+                )
+            }
+            CheckError::UnsupportedLaneWidth(w) => write!(
+                f,
+                "unsupported lane width {w}; the fabric supports 1..=64"
+            ),
             CheckError::BadGeometry(s) => write!(f, "bad geometry: {s}"),
             CheckError::UnknownName(s) => write!(f, "unknown name {s:?}"),
             CheckError::DuplicateName(s) => write!(f, "duplicate stage name {s:?}"),
@@ -58,10 +70,18 @@ impl std::fmt::Display for CheckError {
 
 impl std::error::Error for CheckError {}
 
+/// Enforce type + geometry + receipt effects under the default kernel
+/// registry. See [`check_with`] for the registry-aware form.
+pub fn check(program: &QProgram) -> Result<(), CheckError> {
+    check_with(program, &KernelRegistry::default())
+}
+
 /// Enforce type + geometry + receipt effects. A `@receipt Lk` demand above
 /// the program's computed effect is a compile error: the stage that caps the
 /// guarantee is named in the error so the caller knows which kernel to change.
-pub fn check(program: &QProgram) -> Result<(), CheckError> {
+/// Guarantees come from the registry — earned by replay-oracle registration,
+/// never hardcoded here.
+pub fn check_with(program: &QProgram, registry: &KernelRegistry) -> Result<(), CheckError> {
     if program.stages.is_empty() {
         return Err(CheckError::EmptyProgram);
     }
@@ -74,10 +94,13 @@ pub fn check(program: &QProgram) -> Result<(), CheckError> {
             output: o_len,
         });
     }
-    if program.param_ty.dtype != DType::I64 || program.output_ty.dtype != DType::I64 {
-        return Err(CheckError::UnsupportedDtype(
-            "only i64 ports in Q0".to_string(),
-        ));
+    // Ports are typed streams: a pipeline is dtype-homogeneous (every stage
+    // transforms the same port dtype). i64 and f32 are both first-class.
+    if program.param_ty.dtype != program.output_ty.dtype {
+        return Err(CheckError::DtypeMismatch {
+            param: program.param_ty.dtype.to_string(),
+            output: program.output_ty.dtype.to_string(),
+        });
     }
 
     check_config(&program.config)?;
@@ -99,13 +122,14 @@ pub fn check(program: &QProgram) -> Result<(), CheckError> {
         return Err(CheckError::OutputNotProduced(program.emit.clone()));
     }
 
-    // Receipt effect: the demand may not exceed the weakest stage's guarantee.
-    let provided = receipt_effect(program);
+    // Receipt effect: the demand may not exceed the weakest stage's earned
+    // guarantee.
+    let provided = receipt_effect_with(program, registry);
     if program.demand > provided {
         let culprit = program
             .stages
             .iter()
-            .find(|s| s.kernel.guaranteed_level() < program.demand)
+            .find(|s| registry.guaranteed_level(&s.kernel) < program.demand)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| "<none>".to_string());
         return Err(CheckError::ReceiptUnsatisfiable {
@@ -124,7 +148,10 @@ fn check_config(c: &ProgramConfig) -> Result<(), CheckError> {
     if c.node_count == 0 {
         return Err(CheckError::BadGeometry("node_count == 0".to_string()));
     }
-    if !matches!(c.lane_width, 1 | 4 | 8 | 16 | 32 | 64) {
+    // Mirror the substrate exactly: any width in 1..=64 packs
+    // (`binetic_core::is_supported_lane_width`), so the checker adds no cap
+    // of its own.
+    if !(1..=64).contains(&c.lane_width) {
         return Err(CheckError::UnsupportedLaneWidth(c.lane_width));
     }
     Ok(())
@@ -163,5 +190,42 @@ qblock p(x: i64[8]) -> i64[8] {
         let bad = P.replace("-> i64[8]", "-> i64[4]");
         let p = Parser::parse(&bad).unwrap();
         assert!(matches!(check(&p), Err(CheckError::ShapeMismatch { .. })));
+    }
+
+    #[test]
+    fn accepts_f32_ports() {
+        let p32 = P.replace("i64[8]", "f32[8]");
+        let p = Parser::parse(&p32).unwrap();
+        check(&p).unwrap();
+    }
+
+    #[test]
+    fn rejects_mixed_dtypes() {
+        let bad = P.replace("-> i64[8]", "-> f32[8]");
+        let p = Parser::parse(&bad).unwrap();
+        assert!(matches!(check(&p), Err(CheckError::DtypeMismatch { .. })));
+    }
+
+    #[test]
+    fn accepts_any_lane_width_in_substrate_range() {
+        // Widths outside the old {1,4,8,16,32,64} whitelist but inside the
+        // substrate's 1..=64 must pass: the checker adds no cap of its own.
+        for w in [1u16, 3, 5, 32, 64] {
+            let src = P.replace("lane_width = 8;", &format!("lane_width = {w};"));
+            let p = Parser::parse(&src).unwrap();
+            check(&p).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_lane_width_outside_substrate_range() {
+        for w in [0u16, 65, 256] {
+            let src = P.replace("lane_width = 8;", &format!("lane_width = {w};"));
+            let p = Parser::parse(&src).unwrap();
+            assert!(
+                matches!(check(&p), Err(CheckError::UnsupportedLaneWidth(_))),
+                "lane width {w} should be rejected"
+            );
+        }
     }
 }

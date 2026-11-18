@@ -46,12 +46,23 @@ impl fmt::Display for Level {
     }
 }
 
-/// Storage dtype on a port. Q0 supports the integer lane substrate; the
-/// 23 `binetic-quant` dtypes arrive as annotations in Phase 2.
+/// Storage dtype on a port. All dtypes are first-class:
+/// - `i64` — signed integer lanes; `dot` accumulates saturating.
+/// - `f32` — IEEE-754 bit patterns in the low 32 bits of the lane.
+/// - `u64` — 64-bit unsigned bit pattern, one lane.
+/// - `u128` — 128-bit unsigned, two 64-bit lanes (little-endian words).
+/// - `u256` — 256-bit unsigned, four 64-bit lanes (little-endian words).
+///
+/// A fabric lane is 64 bits, so wide values occupy `words()` consecutive
+/// lanes; unsigned arithmetic is modular (mod 2^(64·words)). The 23
+/// `binetic-quant` dtypes arrive as annotations in Phase 2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DType {
     I64,
     F32,
+    U64,
+    U128,
+    U256,
 }
 
 impl DType {
@@ -59,8 +70,36 @@ impl DType {
         match s {
             "i64" => Some(DType::I64),
             "f32" => Some(DType::F32),
+            "u64" => Some(DType::U64),
+            "u128" => Some(DType::U128),
+            "u256" => Some(DType::U256),
             _ => None,
         }
+    }
+
+    /// Fabric lanes (64-bit words) one value occupies.
+    pub fn words(self) -> usize {
+        match self {
+            DType::I64 | DType::F32 | DType::U64 => 1,
+            DType::U128 => 2,
+            DType::U256 => 4,
+        }
+    }
+}
+
+impl fmt::Display for DType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                DType::I64 => "i64",
+                DType::F32 => "f32",
+                DType::U64 => "u64",
+                DType::U128 => "u128",
+                DType::U256 => "u256",
+            }
+        )
     }
 }
 
@@ -78,6 +117,13 @@ impl TensorType {
 
     pub fn len(&self) -> usize {
         self.shape.iter().product()
+    }
+
+    /// Total fabric lanes this tensor occupies: elements × dtype words.
+    /// This is what the plan's `input_len`/`output_len` and the fabric's
+    /// `port.lane_count` see.
+    pub fn lane_len(&self) -> usize {
+        self.len() * self.dtype.words()
     }
 
     pub fn is_empty(&self) -> bool {
