@@ -32,6 +32,7 @@ pub mod kernels;
 pub mod lexer;
 pub mod lower;
 pub mod parser;
+pub mod sign;
 pub mod synth;
 
 pub use binetic_evolver::Fitness;
@@ -46,7 +47,11 @@ pub use kernels::{
     receipt_effect_with, DotKernel, DotOracle, FabricKernel, FwhtKernel, FwhtOracle, GateKernel,
     GateOracle, KernelRegistry, KernelSpec, QKernel, ReplayOracle,
 };
-pub use lower::{compile, run, run_with, CompileError, RunError, RunResult, StageReceipt};
+pub use lower::{
+    compile, run, run_signed, run_with, run_with_signed, CompileError, RunError, RunResult,
+    StageReceipt,
+};
+pub use sign::{verify_attribution, NodeKey};
 pub use synth::{
     build_program, parse_intent, render_q, synthesize, Geometry, Intent, SynthError, Synthesis,
 };

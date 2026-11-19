@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use binetic_evolver::{FixedThroughput, LaneScaledThroughput};
 use binetic_q::{
     build_program, check, compile, evolve, optimize, parse_intent, parser::Parser,
-    receipt_effect, render_q, run, synthesize, EvolveConfig, OptimizeConfig, StructureGenome,
+    receipt_effect, render_q, run, run_signed, synthesize, EvolveConfig, NodeKey, OptimizeConfig,
+    StructureGenome,
 };
 use serde::Serialize;
 
@@ -48,6 +49,8 @@ enum Command {
     },
     Attest {
         source: PathBuf,
+        /// Optional node key seed for attribution signing. `None` = unsigned.
+        sign_seed: Option<u64>,
     },
 }
 
@@ -145,7 +148,18 @@ fn parse_args() -> Result<Command, String> {
             model: model()?,
         }),
         "synth" => Ok(Command::Synth { source }),
-        "attest" => Ok(Command::Attest { source }),
+        "attest" => Ok(Command::Attest {
+            source,
+            sign_seed: match args.iter().position(|a| a == "--sign-key") {
+                Some(i) => Some(
+                    args.get(i + 1)
+                        .ok_or_else(|| "--sign-key needs a seed value".to_string())?
+                        .parse::<u64>()
+                        .map_err(|_| "bad --sign-key (expected u64 seed)".to_string())?,
+                ),
+                None => None,
+            },
+        }),
         "evolve" => Ok(Command::Evolve {
             source,
             generations: flag("--gen", "8")?
@@ -281,6 +295,9 @@ struct AttestJson {
     level2: bool,
     level3: bool,
     all_valid: bool,
+    /// `null` = unsigned run; hex string = attribution tag over chain_root.
+    /// Verify with `verify_attribution(key, chain_root, tag)`.
+    attribution_tag: Option<String>,
     source: String,
 }
 
@@ -504,11 +521,12 @@ fn real_main() -> Result<(), String> {
                 .unwrap()
             );
         }
-        Command::Attest { source } => {
+        Command::Attest { source, sign_seed } => {
             let src = read_source(&source)?;
             let p = Parser::parse(&src).map_err(|e| format!("parse: {e}"))?;
             let effect = receipt_effect(&p).as_str().to_string();
-            let r = run(&p).map_err(|e| format!("run: {e}"))?;
+            let key = sign_seed.map(NodeKey::from_seed).unwrap_or_else(NodeKey::zero);
+            let r = run_signed(&p, &key).map_err(|e| format!("run: {e}"))?;
             println!(
                 "{}",
                 serde_json::to_string(&AttestJson {
@@ -533,6 +551,7 @@ fn real_main() -> Result<(), String> {
                     level2: r.report.level2,
                     level3: r.report.level3,
                     all_valid: r.report.all_valid,
+                    attribution_tag: r.attribution_tag.map(|t| hex(&t)),
                     source: src,
                 })
                 .unwrap()

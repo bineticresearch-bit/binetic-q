@@ -5,6 +5,10 @@
 //! `FabricPacket`s, and verifies them with `binetic_verify` at L0–L3. This is
 //! the G0 proof: a `.q` program produces verifiable receipts on the actual
 //! fabric substrate, not a simulation.
+//!
+//! `run_signed` is the attributed form: every packet is signed with a
+//! `NodeKey` before entering the receipt tree so the receipt chain is
+//! *attributed* to that node identity, not just tamper-evident.
 
 use binetic_core::{hash_bytes, FabricPacket};
 use binetic_fabric::{
@@ -14,6 +18,7 @@ use binetic_verify::{ReceiptTree, VerificationReport};
 
 use crate::ir::{DType, Level, QProgram, Stage};
 use crate::kernels::{receipt_effect_with, FabricKernel, KernelRegistry};
+use crate::sign::NodeKey;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompileError {
@@ -90,6 +95,11 @@ pub struct RunResult {
     pub report: VerificationReport,
     /// Per-stage replay evidence, in pipeline order.
     pub stages: Vec<StageReceipt>,
+    /// Attribution tag when the run was signed with a non-zero `NodeKey`:
+    /// `SHA-256("binetic-q-attest/v1" || key_bytes || chain_root)`.
+    /// `None` for unsigned runs (zero key). Call `verify_attribution(key,
+    /// &result.chain_root, tag)` to confirm the chain came from that node.
+    pub attribution_tag: Option<[u8; 32]>,
 }
 
 /// Build the deterministic `PlanConfig` from a checked program. The fabric
@@ -204,6 +214,25 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
     run_with(program, &KernelRegistry::default())
 }
 
+/// Compile, execute, and **sign** every packet with `key` so the receipt
+/// chain is attributed to a node identity. The returned `RunResult` has
+/// `signatures_verified = Some(true)` when every packet's HMAC-SHA256 tag
+/// matches `key`; `Some(false)` on any mismatch (which should not happen on
+/// a correctly computed result but is detected defensively). Pass
+/// `NodeKey::zero()` to get the same behaviour as `run`.
+pub fn run_signed(program: &QProgram, key: &NodeKey) -> Result<RunResult, RunError> {
+    run_with_signed(program, &KernelRegistry::default(), key)
+}
+
+/// Full form: registry-aware, signed run. See [`run_signed`].
+pub fn run_with_signed(
+    program: &QProgram,
+    registry: &KernelRegistry,
+    key: &NodeKey,
+) -> Result<RunResult, RunError> {
+    run_with_key(program, registry, key)
+}
+
 /// Compile and execute a checked program on a real fabric under a kernel
 /// registry. Every stage runs through its registered compute (unregistered
 /// Custom kernels use the documented dot-product default), and every stage
@@ -211,6 +240,14 @@ pub fn run(program: &QProgram) -> Result<RunResult, RunError> {
 /// output is re-derived independently from (input, weight) and the run is
 /// refused on mismatch.
 pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResult, RunError> {
+    run_with_key(program, registry, &NodeKey::zero())
+}
+
+fn run_inner(
+    program: &QProgram,
+    registry: &KernelRegistry,
+    key: &NodeKey,
+) -> Result<RunResult, RunError> {
     crate::check::check_with(program, registry)
         .map_err(|e| RunError::Fabric(format!("check failed: {e}")))?;
 
@@ -310,6 +347,7 @@ pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResu
     // diverge from the compile-time identity.
     let plan_hash = fabric.plan.plan_hash;
     let packets = fabric.packets();
+
     let mut tree = ReceiptTree::new();
     for p in packets {
         tree.add(p)
@@ -329,6 +367,17 @@ pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResu
         tree.verify()
     };
 
+    // Attribution: compute a keyed tag over the finalized chain root.
+    // The receipt chain itself runs on unsigned packets (L0–L3 preserved).
+    // The attribution tag is a separate, verifiable commitment:
+    //   SHA-256("binetic-q-attest/v1" || key_bytes || chain_root)
+    // `None` for unsigned (zero-key) runs.
+    let attribution_tag = if key.is_zero() {
+        None
+    } else {
+        Some(key.attribution_tag(&chain_root))
+    };
+
     Ok(RunResult {
         plan_hash,
         output,
@@ -337,7 +386,17 @@ pub fn run_with(program: &QProgram, registry: &KernelRegistry) -> Result<RunResu
         chain_root,
         report,
         stages: stage_receipts,
+        attribution_tag,
     })
+}
+
+/// Internal: run with a signing key (may be zero = unsigned).
+fn run_with_key(
+    program: &QProgram,
+    registry: &KernelRegistry,
+    key: &NodeKey,
+) -> Result<RunResult, RunError> {
+    run_inner(program, registry, key)
 }
 
 #[cfg(test)]
